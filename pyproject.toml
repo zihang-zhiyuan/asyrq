@@ -6,8 +6,8 @@ name = "asyrq"
 version = "0.1.0"
 description = "Python 1:1 复刻 Go 语言 asynq 库的 Redis 分布式任务队列"
 readme = "README.md"
-requires-python = ">=3.13"
-license = {text = "MIT"}
+requires-python = ">=3.9"
+license = "MIT"
 authors = [
     {name = "asyrq contributors"}
 ]
@@ -41,6 +41,13 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["asyrq*"]
+
+[tool.setuptools.package-data]
+asyrq = ["lua/*.lua", "py.typed"]
+
+[project.urls]
+Homepage = "https://github.com/zihang-zhiyuan/asyrq"
+Repository = "https://github.com/zihang-zhiyuan/asyrq.git"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"                   # 自动检测 async 测试函数
