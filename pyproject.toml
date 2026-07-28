@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: System :: Distributed Computing",
 ]
 dependencies = [
-    "redis[hiredis]>=5.0.0,<6.0.0",   # 异步 Redis 客户端，hiredis 提供更高性能的解析器
+    "redis[hiredis]>=5.0.0,<7.0.0",   # 异步 Redis 客户端，hiredis 提供更高性能的解析器；6.x 支持 Redis 8.0
     "croniter>=2.0.0",                  # Cron 表达式解析器，用于定时任务
 ]
 
