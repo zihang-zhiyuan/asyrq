@@ -1,0 +1,32 @@
+# publish.yml — 自动发布到 PyPI
+# 当推送版本号标签（如 v0.1.2）时触发构建和发布
+
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*" # 推送 v0.1.0, v1.2.3 等标签时触发
+  workflow_dispatch: # 也支持手动触发
+
+jobs:
+  publish:
+    name: Build & Upload to PyPI
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # PyPI 可信发布（可选）
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build
+        run: uv build
+
+      - name: Publish to PyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: uv publish
