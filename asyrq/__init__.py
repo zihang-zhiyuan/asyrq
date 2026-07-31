@@ -2,7 +2,7 @@
 # 1:1 对应 Go asynq 包的所有公开类型和函数
 
 # ---- 版本 ----
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # ---- 核心类型 ----
 from .task import Task, TaskInfo, new_task
@@ -28,6 +28,7 @@ from .options import (
     ProcessIn,
     Retention,
     Group,
+    ResultKey,
 )
 
 # ---- 连接配置 ----
@@ -89,6 +90,7 @@ __all__ = [
     "Option", "MaxRetry", "Queue", "TaskID",
     "Timeout", "Deadline", "Unique",
     "ProcessAt", "ProcessIn", "Retention", "Group",
+    "ResultKey",
 
     # 连接
     "RedisClientOpt", "RedisFailoverClientOpt", "RedisClusterClientOpt",

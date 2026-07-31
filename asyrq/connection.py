@@ -36,7 +36,7 @@ class RedisClientOpt:
     # 最小空闲连接数
     min_idle_conns: int = 0
     # TLS 配置（可选）
-    tls_config: _ssl.Optional[SSLContext] = None
+    tls_config: _ssl.SSLContext | None = None
 
     def make_redis_client(self):
         """根据当前配置创建一个 redis.asyncio.Redis 客户端实例。
@@ -55,16 +55,16 @@ class RedisClientOpt:
 
         # 创建并返回异步 Redis 客户端
         kwargs = {
-            "host": host,
-            "port": port,
-            "username": self.username or None,  # 空字符串转为 None（无 ACL 验证）
-            "password": self.password or None,  # 空字符串转为 None（无密码）
+            "host": host, "port": port,
+            "username": self.username or None,
+            "password": self.password or None,
             "db": self.db,
             "socket_connect_timeout": self.dial_timeout,
             "socket_timeout": self.read_timeout,
-            "socket_keepalive": True,  # 启用 TCP KeepAlive
+            "socket_keepalive": True,
             "max_connections": self.pool_size,
-            "decode_responses": False,  # 不自动解码，保持 bytes 格式
+            "retry_on_timeout": True,
+            "decode_responses": False,
         }
         # 如果配置了 TLS，传递 SSL context
         if self.tls_config:

@@ -3,12 +3,10 @@
 
 from __future__ import annotations
 from typing import Any
-import json as _json
-import uuid as _uuid
 from dataclasses import dataclass, field
 
 from .internal.base import TaskState, DEFAULT_MAX_RETRY, DEFAULT_QUEUE_NAME, DEFAULT_TIMEOUT
-from .options import Option, validate_options, apply_options
+from .options import Option
 
 @dataclass
 class TaskInfo:
@@ -144,6 +142,22 @@ class Task:
     def set_result_writer(self, writer: "ResultWriter") -> None:
         """设置结果写入器（由 Server 内部调用）。"""
         self._writer = writer
+
+    async def update_state(self, data: dict) -> None:
+        """上报中间状态（立即写入 Redis，处理中可多次调用）。
+
+        Key: {task_type}:state:{task_id}，TTL 1 小时。
+        """
+        if self._writer:
+            await self._writer.update_state(data)
+
+    async def finish(self, data: dict) -> None:
+        """写入最终结果（立即写入 Redis，处理完调用一次）。
+
+        Key: {task_type}:result:{task_id}。
+        """
+        if self._writer:
+            await self._writer.finish(data)
 
     def options(self) -> List[Option]:
         """返回任务的所有配置选项。"""

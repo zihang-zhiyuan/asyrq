@@ -22,7 +22,7 @@ for _, task_id in ipairs(scheduled_ids) do
     -- 添加到 pending
     redis.call("LPUSH", KEYS[3], task_id)
     -- 更新任务数据状态
-    local task_key = "asynq:{" .. KEYS[4] .. "}:t:" .. task_id
+    local task_key = "asynq:" .. KEYS[4] .. ":t:" .. task_id
     redis.call("HSET", task_key, "state", "pending")
     moved_count = moved_count + 1
 end
@@ -39,7 +39,7 @@ if moved_count < batch_size then
         -- 添加到 pending
         redis.call("LPUSH", KEYS[3], task_id)
         -- 更新任务数据状态
-        local task_key = "asynq:{" .. KEYS[4] .. "}:t:" .. task_id
+        local task_key = "asynq:" .. KEYS[4] .. ":t:" .. task_id
         redis.call("HSET", task_key, "state", "pending")
         moved_count = moved_count + 1
     end

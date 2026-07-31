@@ -39,9 +39,9 @@ class SchedulerOpts:
         # 预入队回调 — 在任务即将入队前调用
         pre_enqueue_func: Optional[Callable[[Task], Awaitable[None]]] = None,
         # 后入队回调 — 在任务成功入队后调用
-        post_enqueue_func: Optional[Optional[Callable[[TaskInfo, Exception], Awaitable[None]]] ]= None,
+        post_enqueue_func: Optional[Callable[[TaskInfo, Optional[Exception]], Awaitable[None]]] = None,
         # 入队错误处理 — 当入队失败时调用（例如可以发送告警）
-        enqueue_error_handler: Optional[Callable[[Task, list[Option, Exception], Awaitable[None]]] ]= None,
+        enqueue_error_handler: Optional[Callable[[Task, list[Option], Exception], Awaitable[None]]] = None,
     ):
         """初始化调度器选项。
 
@@ -146,7 +146,7 @@ class Scheduler:
         # 状态控制
         self._state: str = "new"               # new → active → closed
         self._shutdown_event = _asyncio.Event()
-        self._bg_task: _asyncio.Optional[Task] = None
+        self._bg_task: Optional[_asyncio.Task] = None
 
     async def register(
         self,

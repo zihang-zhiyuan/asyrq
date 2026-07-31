@@ -225,6 +225,22 @@ class Group(Option):
         return self._name
 
 
+class ResultKey(Option):
+    """设置任务结果写入的 Redis Key。
+
+    任务处理完成后，Handler 通过 ResultWriter 写入的数据
+    会被存到这个 Redis key 下，方便其他服务读取。
+    """
+
+    def __init__(self, redis_key: str):
+        """设置结果 Redis Key。结果最终存储为 {redis_key}:{task_id}"""
+        self._key = redis_key
+
+    def redis_key(self) -> str:
+        """返回 Redis key 前缀。"""
+        return self._key
+
+
 # ============================================================================
 # 选项解析工具函数
 # ============================================================================
@@ -274,6 +290,7 @@ def apply_options(opts: List[Option]) -> dict:
         "retention": 0,                      # 默认不保留
         "group": "",                         # 默认不分组
         "task_id": "",                       # 默认自动生成 ID
+        "result_key": "",                    # 结果写入的 Redis key 前缀
     }
 
     # 遍历所有选项，提取配置值
@@ -298,5 +315,7 @@ def apply_options(opts: List[Option]) -> dict:
             config["group"] = opt.group_name()  # 聚合组名
         elif isinstance(opt, TaskID):
             config["task_id"] = opt.task_id()  # 自定义任务 ID
+        elif isinstance(opt, ResultKey):
+            config["result_key"] = opt.redis_key()  # 结果 Redis key 前缀
 
     return config  # 返回解析后的配置字典

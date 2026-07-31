@@ -2,6 +2,7 @@
 # 定义任务处理器的标准接口，1:1 对应 Go asynq 的 Handler 接口和 HandlerFunc
 
 from __future__ import annotations
+import time as _time
 from typing import Awaitable, Callable
 from abc import ABC, abstractmethod
 
@@ -77,21 +78,37 @@ def wrap_handler_func(func: HandlerFunc) -> Handler:
     return _HandlerFuncAdapter(func)
 
 class Context:
-    """任务处理上下文，包含超时控制和取消信号。
+    """任务处理上下文。
 
-    传递给 Handler.process_task() 的上下文对象，
-    用于控制任务处理的超时和响应取消请求。
+    在 Handler 中可用来:
+        - ctx.cancelled → 任务是否被取消
+        - ctx.deadline  → 截止时间戳（纳秒）
+        - ctx.timeout   → 超时秒数
+        - ctx.task_id   → 当前任务 ID
+        - ctx.remaining → 剩余时间（秒），超时返回 0
     """
 
     def __init__(self):
-        """初始化上下文。"""
-        self._cancelled = False  # 取消标志位
+        self._cancelled = False
+        self._start_ns: int = int(time.time() * 1e9)  # 起始时间（纳秒）
+        self.deadline: int = 0      # 截止时间（纳秒）
+        self.timeout: int = 0       # 超时（秒）
+        self.task_id: str = ""      # 任务 ID
 
     def cancel(self) -> None:
-        """取消当前任务的执行。"""
+        """取消当前任务。"""
         self._cancelled = True
 
     @property
     def cancelled(self) -> bool:
         """返回任务是否已被取消。"""
         return self._cancelled
+
+    @property
+    def remaining(self) -> int:
+        """返回剩余处理时间（秒），无超时返回 -1。"""
+        if self.timeout <= 0:
+            return -1
+        import time as _time
+        elapsed = (int(_time.time() * 1e9) - self._start_ns) // 1_000_000_000
+        return max(0, self.timeout - elapsed)

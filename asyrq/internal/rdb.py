@@ -102,6 +102,7 @@ class RDB(Broker):
             "dequeue", "done", "retry", "archive", "requeue",
             "forward", "list_lease_expired", "write_server_state",
             "clear_server_state", "aggregation_check", "delete_expired_completed",
+            "add_to_group_unique",
         ]
         for name in script_names:  # 遍历所有脚本名
             _register_lua_script(self._client, name)  # 注册每个脚本
@@ -283,29 +284,34 @@ class RDB(Broker):
                 if msg:
                     return msg
         else:
-            # 加权优先级：按权重随机选择队列
+            # 加权优先级：按权重随机选择队列，逐个尝试直到找到任务
             if weights:
-                # 使用权重进行加权随机选择
-                total_weight = sum(weights.get(q, 1) for q in queues)
-                # 只考虑有权重的队列
                 queue_list = [q for q in queues if q in weights] or queues
                 weight_list = [weights.get(q, 1) for q in queue_list]
-                # 归一化权重后随机选择
-                r = _random.randint(1, sum(weight_list))
-                cumulative = 0
-                for qname, w in zip(queue_list, weight_list):
-                    cumulative += w
-                    if r <= cumulative:
-                        msg = await self._try_dequeue_one(qname)
-                        if msg:
-                            return msg
-                        break
+                # 记录已尝试的空队列，全部为空时才返回 None
+                tried: set = set()
+                while len(tried) < len(queue_list):
+                    # 从未尝试的队列中按权重随机选择
+                    available = [(q, w) for q, w in zip(queue_list, weight_list) if q not in tried]
+                    total_w = sum(w for _, w in available)
+                    r = _random.randint(1, total_w)
+                    cumulative = 0
+                    for qname, w in available:
+                        cumulative += w
+                        if r <= cumulative:
+                            msg = await self._try_dequeue_one(qname)
+                            if msg:
+                                return msg
+                            tried.add(qname)  # 该队列为空，标记并继续尝试
+                            break
             else:
-                # 无权重配置时随机选择一个队列
-                qname = _random.choice(queues)
-                msg = await self._try_dequeue_one(qname)
-                if msg:
-                    return msg
+                # 无权重配置时随机选择队列，逐个尝试
+                shuffled = list(queues)
+                _random.shuffle(shuffled)
+                for qname in shuffled:
+                    msg = await self._try_dequeue_one(qname)
+                    if msg:
+                        return msg
 
         return None  # 所有队列都为空
 
@@ -559,6 +565,7 @@ class RDB(Broker):
             "status": info.status,
             "start_time": info.start_time,
             "active_worker_count": info.active_worker_count,
+            "routes": info.routes,
         }, ensure_ascii=False)
 
         await _get_lua_script("write_server_state")(
@@ -597,7 +604,7 @@ class RDB(Broker):
         servers = []
         for sid in server_ids:
             sid_str = sid.decode("utf-8") if isinstance(sid, bytes) else sid
-            skey_detail = f"asynq:servers:{{{sid_str}}}"
+            skey_detail = f"asynq:servers:{sid_str}"
             data = await self._client.get(skey_detail)
             if data:
                 info_dict = _json.loads(data.decode("utf-8"))
@@ -825,7 +832,7 @@ class RDB(Broker):
         return task_id
 
     async def add_to_group_unique(self, msg: TaskMessage, gname: str, ttl: int) -> str:
-        """唯一地将任务添加到聚合组。
+        """唯一地将任务添加到聚合组（Lua 脚本保证原子性）。
 
         Args:
             msg: 任务消息
@@ -835,17 +842,26 @@ class RDB(Broker):
         Returns:
             str: 任务 ID，重复返回空字符串
         """
-        # 使用 SETNX 原子地设置唯一锁（避免 TOCTOU 竞态条件）
-        ukey = unique_key(msg.queue, msg.type, msg.payload)
         task_id = msg.id or _uuid.uuid4().hex
-        # SET key value EX ttl NX — 只有当 key 不存在时才设置成功
-        acquired = await self._client.set(ukey, task_id, ex=ttl, nx=True)
-        if not acquired:
-            return ""  # 唯一锁已存在，任务重复
-
         msg.id = task_id
-        # 添加到组
-        return await self.add_to_group(msg, gname)
+
+        await self._add_queue_to_set(msg.queue)
+
+        ukey = unique_key(msg.queue, msg.type, msg.payload)
+        tkey = task_key(msg.queue, task_id)
+        gkey = group_key(msg.queue, gname)
+        agkey = all_groups_key(msg.queue)
+        now = self._now_nsec()
+
+        result = await _get_lua_script("add_to_group_unique")(
+            keys=[tkey, gkey, agkey, ukey],
+            args=[msg.to_json(), task_id, gname, str(now), str(ttl)],
+        )
+
+        if not result:
+            return ""  # 任务已存在
+
+        return task_id
 
     async def list_groups(self, qname: str) -> List[str]:
         """列出队列中所有聚合组名。
@@ -888,7 +904,7 @@ class RDB(Broker):
 
         if result:
             # 设置了聚合锁，返回锁 key
-            lock_key = f"asynq:{{{qname}}}:aggregation_lock:{gname}"
+            lock_key = f"asynq:qname:aggregation_lock:{gname}"
             await self._client.set(lock_key, "1", ex=30)  # 30 秒锁
             return lock_key
 
@@ -907,7 +923,7 @@ class RDB(Broker):
         """
         pipe = self._client.pipeline()
         for entry in entries:
-            skey = f"asynq:schedulers:{{{entry['id']}}}"
+            skey = f"asynq:schedulers:{entry['id']}"
             pipe.set(skey, _json.dumps(entry, ensure_ascii=False), ex=ttl)
         await pipe.execute()
 

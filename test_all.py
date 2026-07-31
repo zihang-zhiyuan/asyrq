@@ -2,7 +2,11 @@
 asyrq 完整功能测试用例
 =========================
 运行方式: python test_all.py
-要求: 本地 Redis 运行在 127.0.0.1:6380, 密码 fastapiadmin_redis（DB 15 用于测试）
+要求: 本地 Redis 运行（默认 127.0.0.1:6379 DB 15 用于测试）
+可通过环境变量配置:
+  ASYRQ_REDIS_ADDR      — Redis 地址（默认 127.0.0.1:6379）
+  ASYRQ_REDIS_PASSWORD  — Redis 密码（默认空）
+  ASYRQ_REDIS_DB        — Redis DB（默认 15）
 
 测试覆盖:
  1. 任务创建与选项
@@ -17,7 +21,6 @@ asyrq 完整功能测试用例
 10. 连接配置
 """
 import asyncio, json, sys, time, os
-
 # ============================================================
 # 测试工具
 # ============================================================
@@ -40,7 +43,11 @@ def check(name: str, condition: bool, detail: str = ""):
 async def is_redis_available():
     try:
         import redis.asyncio as rds
-        r = rds.Redis(host="127.0.0.1", port=6380, password="fastapiadmin_redis", db=15)
+        addr = os.environ.get("ASYRQ_REDIS_ADDR", "127.0.0.1:6379")
+        host, _, port = addr.partition(":")
+        pwd = os.environ.get("ASYRQ_REDIS_PASSWORD", "")
+        db = int(os.environ.get("ASYRQ_REDIS_DB", "15"))
+        r = rds.Redis(host=host, port=int(port or "6379"), password=pwd or None, db=db)
         await r.ping()
         await r.aclose()
         return True
@@ -50,12 +57,19 @@ async def is_redis_available():
 
 def get_redis_opt():
     from asyrq.connection import RedisClientOpt
-    return RedisClientOpt(addr="127.0.0.1:6380", password="fastapiadmin_redis", db=15)
+    addr = os.environ.get("ASYRQ_REDIS_ADDR", "127.0.0.1:6379")
+    pwd = os.environ.get("ASYRQ_REDIS_PASSWORD", "")
+    db = int(os.environ.get("ASYRQ_REDIS_DB", "15"))
+    return RedisClientOpt(addr=addr, password=pwd, db=db)
 
 
 def get_raw_redis():
     import redis.asyncio as rds
-    return rds.Redis(host="127.0.0.1", port=6380, password="fastapiadmin_redis", db=15)
+    addr = os.environ.get("ASYRQ_REDIS_ADDR", "127.0.0.1:6379")
+    host, _, port = addr.partition(":")
+    pwd = os.environ.get("ASYRQ_REDIS_PASSWORD", "")
+    db = int(os.environ.get("ASYRQ_REDIS_DB", "15"))
+    return rds.Redis(host=host, port=int(port or "6379"), password=pwd or None, db=db)
 
 
 # ============================================================
@@ -583,24 +597,24 @@ async def test_redis_keys():
         unique_key, ALL_QUEUES_KEY, SERVERS_KEY,
     )
 
-    check("pending key", pending_key("q") == "asynq:{q}:pending")
-    check("active key", active_key("q") == "asynq:{q}:active")
-    check("scheduled key", scheduled_key("q") == "asynq:{q}:scheduled")
-    check("retry key", retry_key("q") == "asynq:{q}:retry")
-    check("archived key", archived_key("q") == "asynq:{q}:archived")
-    check("completed key", completed_key("q") == "asynq:{q}:completed")
-    check("task key", task_key("q", "id1") == "asynq:{q}:t:id1")
-    check("paused key", paused_key("q") == "asynq:{q}:paused")
-    check("lease key", lease_key("q") == "asynq:{q}:lease")
-    check("group key", group_key("q", "g") == "asynq:{q}:aggregation:g")
-    check("all groups", all_groups_key("q") == "asynq:{q}:groups")
+    check("pending key", pending_key("q") == "asynq:q:pending")
+    check("active key", active_key("q") == "asynq:q:active")
+    check("scheduled key", scheduled_key("q") == "asynq:q:scheduled")
+    check("retry key", retry_key("q") == "asynq:q:retry")
+    check("archived key", archived_key("q") == "asynq:q:archived")
+    check("completed key", completed_key("q") == "asynq:q:completed")
+    check("task key", task_key("q", "id1") == "asynq:q:t:id1")
+    check("paused key", paused_key("q") == "asynq:q:paused")
+    check("lease key", lease_key("q") == "asynq:q:lease")
+    check("group key", group_key("q", "g") == "asynq:q:aggregation:g")
+    check("all groups", all_groups_key("q") == "asynq:q:groups")
     check("all queues", all_queues_key() == "asynq:queues")
     check("servers", servers_key() == "asynq:servers")
-    check("workers", workers_key("h", 1, "s") == "asynq:workers:{h:1:s}")
+    check("workers", workers_key("h", 1, "s") == "asynq:workers:h:1:s")
 
     import hashlib
     h = hashlib.sha256(b"test").hexdigest()
-    check("unique key", unique_key("q", "type", b"test") == f"asynq:{{q}}:unique:type:{h}")
+    check("unique key", unique_key("q", "type", b"test") == f"asynq:q:unique:type:{h}")
 
     check("ALL_QUEUES_KEY 常量", ALL_QUEUES_KEY == "asynq:queues")
     check("SERVERS_KEY 常量", SERVERS_KEY == "asynq:servers")

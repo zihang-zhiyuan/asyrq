@@ -25,8 +25,9 @@ from .internal.base import (
     DEFAULT_SHUTDOWN_TIMEOUT,
     SERVER_HEARTBEAT_INTERVAL, LEASE_DURATION,
     DEFAULT_GROUP_MAX_DELAY, DEFAULT_GROUP_GRACE_PERIOD, DEFAULT_GROUP_MAX_SIZE,
+    completed_key,
 )
-from .internal.rdb import RDB
+from .internal.rdb import RDB, _get_lua_script
 from .internal import timeutil as _timeutil
 from .internal.log import Logger, DefaultLogger, LogLevel
 from .connection import RedisClientOpt
@@ -55,6 +56,8 @@ class Config:
     """
     # 最大并发处理任务数，默认 CPU 核心数
     concurrency: int = field(default_factory=lambda: (_os.cpu_count() or 4))
+    name: str = ""
+    code: str = ""
 
     # 队列及优先级权重映射 {"queue_name": priority}
     # 默认只有 "default" 队列，权重 1
@@ -68,9 +71,8 @@ class Config:
 
     # 自定义日志器
     logger: Optional[Logger] = None
-
-    # 日志级别
     log_level: LogLevel = LogLevel.INFO
+    log_dir: str = "logs"
 
     # 优雅关闭最长等待时间（秒），超时后强制终止
     shutdown_timeout: int = DEFAULT_SHUTDOWN_TIMEOUT
@@ -105,7 +107,7 @@ class Config:
     group_max_size: int = DEFAULT_GROUP_MAX_SIZE
 
     # 聚合函数 — 将一组任务合并为一个任务
-    group_aggregator: Optional[Callable[[str, list[Task], Task]] ]= None
+    group_aggregator: Optional[Callable[[str, list[Task]], Task]] = None
 
     # ======== 清理配置 ========
 
@@ -167,20 +169,36 @@ class ServeMux(Handler):
 
     def __init__(self):
         """初始化任务路由器。"""
-        self._handlers: Dict[str, Handler] = {}  # 精确匹配处理器映射
-        self._prefix_handlers: Dict[str, Handler] = {}  # 前缀匹配处理器映射
-        self._middlewares: List[MiddlewareFunc] = []  # 全局中间件列表
+        self._handlers: Dict[str, Handler] = {}
+        self._prefix_handlers: Dict[str, Handler] = {}
+        self._middlewares: List[MiddlewareFunc] = []
+
+    def routes(self) -> list[str]:
+        """返回所有已注册的路由（精确匹配 + 前缀匹配）。"""
+        patterns = list(self._handlers.keys()) + list(self._prefix_handlers.keys())
+        # 收集嵌套 ServeMux 的路由
+        for h in self._handlers.values():
+            if isinstance(h, ServeMux):
+                patterns.extend(h.routes())
+        for h in self._prefix_handlers.values():
+            if isinstance(h, ServeMux):
+                patterns.extend(h.routes())
+        return sorted(set(patterns))  # 去重排序
 
     def handle(self, pattern: str, handler: Handler) -> None:
         """注册任务类型 → 处理器的映射。
 
         支持前缀匹配：以 ":" 结尾的 pattern 会匹配所有以此开头的任务类型。
+        空字符串 "" 作为最低优先级 catch-all（匹配所有未命中类型）。
 
         Args:
-            pattern: 任务类型模式（如 "email:send" 或 "email:"）
+            pattern: 任务类型模式（如 "email:send" 或 "email:" 或 ""）
             handler: 任务处理器
         """
-        if pattern.endswith(":"):
+        if pattern == "":
+            # catch-all — 最低优先级兜底
+            self._prefix_handlers[""] = handler
+        elif pattern.endswith(":"):
             # 前缀匹配 — 如 "email:" 匹配 "email:send", "email:notify" 等
             self._prefix_handlers[pattern] = handler
         else:
@@ -188,13 +206,18 @@ class ServeMux(Handler):
             self._handlers[pattern] = handler
 
     def handle_func(self, pattern: str, func: HandlerFunc) -> None:
-        """注册任务类型 → 处理函数的映射。
+        """注册任务类型 → 处理函数的映射。"""
+        self.handle(pattern, wrap_handler_func(func))
 
-        Args:
-            pattern: 任务类型模式
-            func: 异步处理函数 async def func(ctx, task) -> None
-        """
-        self.handle(pattern, wrap_handler_func(func))  # 包装为 Handler
+    def task(self, pattern: str):
+        """装饰器注册处理器（FastAPI 风格），子 mux 也支持。"""
+        def decorator(obj):
+            if isinstance(obj, type):
+                self.handle(pattern, obj())
+            else:
+                self.handle_func(pattern, obj)
+            return obj
+        return decorator
 
     def use(self, *middlewares: MiddlewareFunc) -> None:
         """注册全局中间件。
@@ -255,7 +278,33 @@ class ServeMux(Handler):
         if best_match:
             return best_match
 
+        # catch-all "" 作为最后兜底（优先级最低）
+        if "" in self._prefix_handlers:
+            return self._prefix_handlers[""]
+
         raise ValueError(f"未找到任务 '{typename}' 的处理器")
+
+    def _merge_into(self, target: "ServeMux") -> None:
+        """将当前 mux 中所有已注册的 handler 合并到目标 mux。
+
+        目标 mux 已有的 handler 不会被覆盖（外部优先）。
+
+        Args:
+            target: 合并目标 ServeMux
+        """
+        for pattern, handler in self._handlers.items():
+            if pattern not in target._handlers:
+                target._handlers[pattern] = handler
+        for pattern, handler in self._prefix_handlers.items():
+            if pattern not in target._prefix_handlers:
+                target._prefix_handlers[pattern] = handler
+        for mw in self._middlewares:
+            if mw not in target._middlewares:
+                target._middlewares.append(mw)
+
+    def _has_handlers(self) -> bool:
+        """检查是否有已注册的 handler。"""
+        return bool(self._handlers or self._prefix_handlers)
 
 # ============================================================================
 # Server — 任务处理服务器
@@ -299,11 +348,9 @@ class Server:
         self._logger = self._config.logger or DefaultLogger(self._config.log_level)  # 日志器
 
         # 服务器标识信息
-        self._host = _socket.gethostname()      # 主机名
-        self._pid = _os.getpid()                 # 进程 ID
-        self._server_id = _uuid.uuid4().hex      # 服务器唯一 ID
+        self._host = _socket.gethostname()
+        self._pid = _os.getpid()
 
-        # 创建或复用 Redis 客户端
         if isinstance(redis_conn, _redis.Redis):
             self._redis = redis_conn
             self._owns_connection = False
@@ -313,6 +360,16 @@ class Server:
 
         # 创建 Redis Broker
         self._broker = RDB(self._redis, self._logger)
+
+        # 内置路由器（FastAPI 风格）
+        self._mux = ServeMux()
+        self._handler: Handler | ServeMux | None = None
+
+        # 服务器标识
+        self._server_id = (
+            self._config.code or
+            (f"{self._config.name}:{_uuid.uuid4().hex[:8]}" if self._config.name else _uuid.uuid4().hex)
+        )
 
         # 服务器状态
         self._state: str = "new"        # new → active → quiet → stopped → closed
@@ -340,36 +397,25 @@ class Server:
     # 公共 API
     # ========================================================================
 
-    async def run(self, handler: Handler | ServeMux) -> None:
-        """启动服务器并阻塞直到收到系统信号。
-
-        1:1 对应 Go asynq 的 Server.Run 方法。
-
-        Args:
-            handler: 任务处理器或路由器
-        """
-        # 启动服务器
+    async def run(self, handler: Handler | ServeMux | None = None) -> None:
+        """启动服务器并阻塞直到收到系统信号。"""
         await self.start(handler)
-
-        # 等待信号或手动关闭
         await self._wait_for_signal()
-
-        # 执行优雅关闭
         await self.shutdown()
 
-    async def start(self, handler: Handler | ServeMux) -> None:
+    async def start(self, handler: Handler | ServeMux | None = None) -> None:
         """启动服务器（非阻塞）。
 
-        1:1 对应 Go asynq 的 Server.Start 方法。
-
-        Args:
-            handler: 任务处理器或路由器
+        如果同时通过 @server.task() 装饰器注册了 handler 并传入了外部 handler，
+        会自动合并：外部 handler 优先级更高，装饰器注册的作为补充。
         """
         if self._state != "new":
             raise RuntimeError(f"服务器已启动，当前状态: {self._state}")
 
-        self._state = "active"  # 标记为活跃状态
-        self._handler = handler  # 保存处理器引用
+        self._state = "active"
+
+        # 合并装饰器注册的子路由到外部 handler
+        self._handler = self._build_handler(handler)
 
         self._logger.info(
             f"服务器启动: 并发={self._config.concurrency}, "
@@ -405,8 +451,57 @@ class Server:
                 name="aggregator"))
 
         # 7. 处理器协程 — 核心任务处理循环
-        self._bg_tasks.append(loop.create_task(self._processor(),
-            name="processor"))
+        self._bg_tasks.append(loop.create_task(self._processor(), name="processor"))
+
+        # ======== 启动信息 ========
+        name_tag = f" name={self._config.name}" if self._config.name else ""
+        code_tag = f" code={self._config.code}" if self._config.code else ""
+        routes_info = ", ".join(self._mux.routes()) or "(无)"
+        self._logger.info(
+            f"━━━ Server 启动 ━━━{name_tag}{code_tag} "
+            f"concurrency={self._config.concurrency} queues={self._config.queues} "
+            f"routes=[{routes_info}]"
+        )
+
+    def _build_handler(self, handler: Handler | ServeMux | None) -> Handler:
+        """构建最终的 handler，合并装饰器子路由。
+
+        合并规则：
+        - 无外部 handler：直接使用 self._mux
+        - 外部是 ServeMux 且 self._mux 有 handler：合并（外部优先）
+        - 外部是普通 Handler 且 self._mux 有 handler：self._mux 加 catch-all 回退
+        - 其余情况：直接使用外部 handler
+        """
+        # 无外部 handler，直接用内置 mux
+        if handler is None:
+            return self._mux
+
+        # 内置 mux 没有注册任何 handler，直接用外部
+        if not self._mux._has_handlers():
+            return handler
+
+        # 外部是 ServeMux → 合并
+        if isinstance(handler, ServeMux):
+            self._mux._merge_into(handler)
+            return handler
+
+        # 外部是普通 Handler → self._mux 做路由，外部做未匹配的兜底
+        self._mux.handle("", handler)
+        return self._mux
+
+    def task(self, pattern: str):
+        """FastAPI 风格装饰器：注册任务处理器。"""
+        def decorator(obj):
+            if isinstance(obj, type):
+                self._mux.handle(pattern, obj())
+            else:
+                self._mux.handle_func(pattern, obj)
+            return obj
+        return decorator
+
+    def use(self, *middlewares):
+        """注册中间件。"""
+        self._mux.use(*middlewares)
 
     async def shutdown(self) -> None:
         """执行优雅关闭。
@@ -421,10 +516,12 @@ class Server:
             return  # 已关闭或未启动
 
         self._logger.info("开始优雅关闭...")
-        self._state = "stopped"  # 标记为已停止
-        self._shutdown_event.set()  # 触发关闭信号
+        self._state = "quiet"  # 先进入静默模式，停止接受新任务
+        self._quiet_event.set()
 
-        # 等待所有后台任务完成（或超时）
+        # 等待后台循环退出并等待 worker 完成
+        self._state = "stopped"
+        self._shutdown_event.set()
         await self._wait_for_bg_tasks()
 
         # 清理 Redis 中的服务器状态
@@ -496,12 +593,11 @@ class Server:
                 # 获取信号量许可（控制并发数）
                 await semaphore.acquire()
 
-                # 为这个任务创建一个 worker 协程
-                worker_task = _asyncio.create_task(
+                # 为这个任务创建一个 worker 协程（fire-and-forget，不跟踪）
+                _asyncio.create_task(
                     self._worker(msg, semaphore),
                     name=f"worker-{msg.id[:8]}"
                 )
-                self._bg_tasks.append(worker_task)
 
             except _asyncio.CancelledError:
                 break
@@ -529,9 +625,9 @@ class Server:
                 headers=msg.headers,          # 请求头
             )
 
-            # 创建结果写入器
-            writer = ResultWriter(task_id, self._broker, msg.queue)
-            task.set_result_writer(writer)  # 注入 writer
+            # 创建结果写入器（传入 typename 用于构建 state/result key）
+            writer = ResultWriter(task_id, self._broker, msg.queue, typename=msg.type)
+            task.set_result_writer(writer)
 
             # 创建处理上下文
             ctx = Context()
@@ -551,22 +647,18 @@ class Server:
                     # 无超时：直接执行
                     await self._handler.process_task(ctx, task)
 
-                # 处理成功 — 标记任务完成
+                # 处理成功
                 await self._broker.done(msg)
-
-                # 写入结果数据（如果有），先写入 Redis 再标记完成
-                result_data = writer.get_data()
-                if result_data:
-                    # 先将结果数据写入任务 Hash（修复 CRITICAL: ResultWriter 数据未持久化）
-                    tkey = f"asynq:{{{msg.queue}}}:t:{task_id}"
-                    await self._redis.hset(tkey, "result", result_data)
-                    await self._broker.mark_as_complete(msg)
-
                 self._logger.debug(f"任务完成: id={task_id}")
 
             except _asyncio.TimeoutError:
                 # 任务超时 — 进入重试流程
                 await self._handle_task_error(msg, task, TimeoutError("任务处理超时"))
+
+            except _asyncio.CancelledError:
+                # 服务器关闭导致任务被取消 — 将任务重新入队以便恢复
+                await self._broker.requeue(msg)
+                self._logger.info(f"任务已重新入队（关闭中断）: id={task_id}")
 
             except SkipRetry:
                 # 明确标记为不重试 — 直接归档
@@ -634,22 +726,23 @@ class Server:
         """心跳协程 — 定期向 Redis 写入服务器状态和延长 worker 租约。"""
         while not self._shutdown_event.is_set():
             try:
+                # 快照活跃任务（防止 worker 并发修改 dict）
+                active_snapshot = list(self._active_task_ids.items())
+
                 # 构建 worker 信息列表
                 worker_info_list = [
                     {"task_id": tid, "queue": qname}
-                    for tid, qname in self._active_task_ids.items()
+                    for tid, qname in active_snapshot
                 ]
 
                 info = ServerInfo(
-                    host=self._host,
-                    pid=self._pid,
-                    server_id=self._server_id,
+                    host=self._host, pid=self._pid, server_id=self._server_id,
                     concurrency=self._config.concurrency,
                     queues=self._config.queues,
                     strict_priority=self._config.strict_priority,
-                    status=self._state,
-                    start_time=_timeutil.now(),
+                    status=self._state, start_time=_timeutil.now(),
                     active_worker_count=len(self._active_task_ids),
+                    routes=self._mux.routes(),  # 已注册的路由
                 )
 
                 # 写入服务器状态（TTL 为心跳间隔的 2 倍）
@@ -657,10 +750,10 @@ class Server:
                 await self._broker.write_server_state(info, worker_info_list, ttl)
 
                 # 延长活跃任务的租约（按队列分别处理）
-                if self._active_task_ids:
+                if active_snapshot:
                     # 按队列分组任务 ID
                     queue_tasks: Dict[str, list[str]] = {}
-                    for tid, qname in self._active_task_ids.items():
+                    for tid, qname in active_snapshot:
                         if qname not in queue_tasks:
                             queue_tasks[qname] = []
                         queue_tasks[qname].append(tid)
@@ -717,11 +810,10 @@ class Server:
         while not self._shutdown_event.is_set():
             try:
                 for qname in self._queues:
-                    ckey = f"asynq:{{{qname}}}:completed"
+                    ckey = completed_key(qname)
                     now = _timeutil.now()
 
                     # 使用批量清理 Lua 脚本
-                    from .internal.rdb import _get_lua_script
                     await _get_lua_script("delete_expired_completed")(
                         keys=[ckey],
                         args=[str(now), str(self._config.janitor_batch_size)],
@@ -764,12 +856,12 @@ class Server:
                         )
                         if trigger_key:
                             # 读取组内所有任务
-                            gkey = f"asynq:{{{qname}}}:aggregation:{gname}"
+                            gkey = f"asynq:qname:aggregation:{gname}"
                             task_ids = await self._redis.zrange(gkey, 0, -1)
                             tasks = []
                             for tid in task_ids:
                                 tid_str = tid.decode("utf-8") if isinstance(tid, bytes) else tid
-                                tkey = f"asynq:{{{qname}}}:t:{tid_str}"
+                                tkey = f"asynq:qname:t:{tid_str}"
                                 data = await self._redis.hget(tkey, "msg")
                                 if data:
                                     msg = TaskMessage.from_json(data.decode("utf-8"))
@@ -796,18 +888,28 @@ class Server:
     async def _wait_for_signal(self) -> None:
         """等待系统信号（SIGINT/SIGTERM）或手动关闭。
 
-        在 Windows 上使用 asyncio.Event 替代信号处理。
+        Unix 上通过 add_signal_handler 注册 SIGINT/SIGTERM；
+        Windows 上通过 signal.signal 注册 SIGINT/SIGBREAK 作为降级方案。
         """
         loop = _asyncio.get_running_loop()
         stop_event = _asyncio.Event()
 
-        # 尝试注册信号处理器（Unix 系统）
         try:
             for sig in (_signal.SIGINT, _signal.SIGTERM):
                 loop.add_signal_handler(sig, stop_event.set)
         except NotImplementedError:
-            # Windows 不支持 add_signal_handler
-            pass
+            # Windows 不支持 add_signal_handler → 使用 signal.signal 降级
+            import signal as _stdlib_signal
+
+            def _handle_signal(signum: int, frame: Any) -> None:
+                self._logger.info(f"收到信号 {signum}，准备优雅关闭...")
+                stop_event.set()
+
+            for sig in (_signal.SIGINT, _signal.SIGBREAK):
+                try:
+                    _stdlib_signal.signal(sig, _handle_signal)
+                except (ValueError, OSError):
+                    pass  # 该信号无法在主线程外注册（忽略）
 
         # 等待停止信号或手动关闭
         while not stop_event.is_set() and not self._shutdown_event.is_set():

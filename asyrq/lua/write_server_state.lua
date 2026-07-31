@@ -14,7 +14,7 @@ redis.call("ZADD", KEYS[1], ARGV[3], ARGV[1])
 redis.call("DEL", KEYS[2])
 
 -- 设置服务器状态 Hash
-local server_key = "asynq:servers:{" .. ARGV[1] .. "}"
+local server_key = "asynq:servers:" .. ARGV[1]
 redis.call("SET", server_key, ARGV[2], "EX", ARGV[4])
 
 return 1  -- 成功

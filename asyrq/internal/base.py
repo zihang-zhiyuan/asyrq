@@ -63,47 +63,47 @@ ASYNQ_VERSION: str = "0.1.0"
 
 def pending_key(qname: str) -> str:
     """生成待处理队列的 Redis Key。asynq:{qname}:pending"""
-    return f"asynq:{{{qname}}}:pending"
+    return f"asynq:{qname}:pending"
 
 def active_key(qname: str) -> str:
     """生成活动任务列表的 Redis Key。asynq:{qname}:active"""
-    return f"asynq:{{{qname}}}:active"
+    return f"asynq:{qname}:active"
 
 def scheduled_key(qname: str) -> str:
     """生成定时任务 ZSet 的 Redis Key。asynq:{qname}:scheduled"""
-    return f"asynq:{{{qname}}}:scheduled"
+    return f"asynq:{qname}:scheduled"
 
 def retry_key(qname: str) -> str:
     """生成重试任务 ZSet 的 Redis Key。asynq:{qname}:retry"""
-    return f"asynq:{{{qname}}}:retry"
+    return f"asynq:{qname}:retry"
 
 def archived_key(qname: str) -> str:
     """生成已归档任务 ZSet 的 Redis Key。asynq:{qname}:archived"""
-    return f"asynq:{{{qname}}}:archived"
+    return f"asynq:{qname}:archived"
 
 def completed_key(qname: str) -> str:
     """生成已完成任务 ZSet 的 Redis Key。asynq:{qname}:completed"""
-    return f"asynq:{{{qname}}}:completed"
+    return f"asynq:{qname}:completed"
 
 def task_key(qname: str, task_id: str) -> str:
     """生成任务数据的 Hash Key。asynq:{qname}:t:{task_id}"""
-    return f"asynq:{{{qname}}}:t:{task_id}"
+    return f"asynq:{qname}:t:{task_id}"
 
 def paused_key(qname: str) -> str:
     """生成队列暂停状态的 Hash Key。asynq:{qname}:paused"""
-    return f"asynq:{{{qname}}}:paused"
+    return f"asynq:{qname}:paused"
 
 def lease_key(qname: str) -> str:
     """生成任务租约信息的 Hash Key。asynq:{qname}:lease"""
-    return f"asynq:{{{qname}}}:lease"
+    return f"asynq:{qname}:lease"
 
 def group_key(qname: str, gname: str) -> str:
     """生成任务组聚合的 Set Key。asynq:{qname}:aggregation:{gname}"""
-    return f"asynq:{{{qname}}}:aggregation:{gname}"
+    return f"asynq:{qname}:aggregation:{gname}"
 
 def all_groups_key(qname: str) -> str:
     """生成所有任务组的 Hash Key。asynq:{qname}:groups"""
-    return f"asynq:{{{qname}}}:groups"
+    return f"asynq:{qname}:groups"
 
 def all_queues_key() -> str:
     """生成全局所有队列名的 Set Key。asynq:queues"""
@@ -115,11 +115,11 @@ def servers_key() -> str:
 
 def workers_key(hostname: str, pid: int, server_id: str) -> str:
     """生成工作协程状态的 ZSet Key。asynq:workers:{hostname}:{pid}:{server_id}"""
-    return f"asynq:workers:{{{hostname}:{pid}:{server_id}}}"
+    return f"asynq:workers:{hostname}:{pid}:{server_id}"
 
 def scheduler_key(entry_id: str) -> str:
     """生成调度器条目的 Key。asynq:schedulers:{entry_id}"""
-    return f"asynq:schedulers:{{{entry_id}}}"
+    return f"asynq:schedulers:{entry_id}"
 
 def scheduler_history_key(entry_id: str) -> str:
     """生成调度器执行历史的 Key。asynq:scheduler_history:{entry_id}"""
@@ -130,7 +130,7 @@ def unique_key(qname: str, task_type: str, payload: bytes) -> str:
     import hashlib
     # 使用 SHA256 计算负载哈希（与 Go asynq 保持一致）
     payload_hash = hashlib.sha256(payload).hexdigest()  # 计算负载的 SHA256 哈希
-    return f"asynq:{{{qname}}}:unique:{task_type}:{payload_hash}"
+    return f"asynq:{qname}:unique:{task_type}:{payload_hash}"
 
 # ============================================================================
 # 常量别名 — 供 rdb.py 等模块使用的便捷引用
@@ -270,6 +270,7 @@ class ServerInfo:
     status: str = ""          # 服务器状态（"active", "quiet", "stopped"）
     start_time: int = 0       # 服务器启动时间（纳秒时间戳）
     active_worker_count: int = 0  # 当前活跃 worker 数量
+    routes: list = field(default_factory=list)  # 已注册的路由列表
 
 # ============================================================================
 # Broker 接口 — Redis 操作的抽象层
