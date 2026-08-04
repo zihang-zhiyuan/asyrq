@@ -1,10 +1,10 @@
 -- done.lua — 任务完成处理脚本
 -- 将任务从 active 列表移除，根据配置写入 completed ZSet 或直接删除
--- KEYS[1]: active list key (asynq:{queue}:active)
--- KEYS[2]: lease hash key (asynq:{queue}:lease)
--- KEYS[3]: 任务数据 Hash key (asynq:{queue}:t:{task_id})
--- KEYS[4]: completed ZSet key (asynq:{queue}:completed)
--- KEYS[5]: processed 计数器 key (asynq:{queue}:processed)
+-- KEYS[1]: active list key (asyrq:{queue}:active)
+-- KEYS[2]: lease hash key (asyrq:{queue}:lease)
+-- KEYS[3]: 任务数据 Hash key (asyrq:{queue}:t:{task_id})
+-- KEYS[4]: completed ZSet key (asyrq:{queue}:completed)
+-- KEYS[5]: processed 计数器 key (asyrq:{queue}:processed)
 -- ARGV[1]: 任务 ID
 -- ARGV[2]: 完成时间（纳秒时间戳）
 -- ARGV[3]: 保留时间（秒，0 = 不保留）

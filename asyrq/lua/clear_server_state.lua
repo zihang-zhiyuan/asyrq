@@ -11,7 +11,7 @@ redis.call("ZREM", KEYS[1], ARGV[1])
 redis.call("DEL", KEYS[2])
 
 -- 删除服务器状态 Hash
-local server_key = "asynq:servers:" .. ARGV[1]
+local server_key = "asyrq:servers:" .. ARGV[1]
 redis.call("DEL", server_key)
 
 return 1  -- 成功

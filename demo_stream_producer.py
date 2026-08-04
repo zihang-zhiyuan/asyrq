@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -16,8 +17,10 @@ logger = logging.getLogger("demo.stream.producer")
 # 配置
 # ---------------------------------------------------------------------------
 STREAM_KEY = "demo:orders"                # Stream 键名
-REDIS_URL = "redis://127.0.0.1:6380"      # Redis 地址
-REDIS_PASSWORD = "fastapiadmin_redis"     # Redis 密码
+# Redis 连接可用环境变量覆盖，便于本地手动测试:
+#   ASYRQ_REDIS_URL / ASYRQ_REDIS_PASSWORD
+REDIS_URL = os.getenv("ASYRQ_REDIS_URL", "redis://127.0.0.1:6380")
+REDIS_PASSWORD = os.getenv("ASYRQ_REDIS_PASSWORD", "fastapiadmin_redis")
 
 # 模拟的订单类型
 ORDERS = [

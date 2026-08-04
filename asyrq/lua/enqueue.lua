@@ -1,7 +1,7 @@
 -- enqueue.lua — 基本任务入队脚本
 -- 将任务消息写入 Redis Hash 并添加到 pending 列表
--- KEYS[1]: 任务数据 Hash key (asynq:{queue}:t:{task_id})
--- KEYS[2]: pending 列表 key (asynq:{queue}:pending)
+-- KEYS[1]: 任务数据 Hash key (asyrq:{queue}:t:{task_id})
+-- KEYS[2]: pending 列表 key (asyrq:{queue}:pending)
 -- ARGV[1]: 序列化的 TaskMessage JSON 字符串
 -- ARGV[2]: 任务 ID
 -- ARGV[3]: 入队时间（纳秒时间戳）

@@ -2,7 +2,7 @@
 -- 将任务从 active 列表移到 archived ZSet（重试次数耗尽）
 -- KEYS[1]: active list key
 -- KEYS[2]: lease hash key
--- KEYS[3]: archived ZSet key (asynq:{queue}:archived)
+-- KEYS[3]: archived ZSet key (asyrq:{queue}:archived)
 -- KEYS[4]: 任务数据 Hash key
 -- KEYS[5]: failed 计数器 key
 -- ARGV[1]: 任务 ID

@@ -1,8 +1,8 @@
 -- add_to_group_unique.lua — 原子地将任务唯一添加到聚合组
--- KEYS[1]: 任务数据 Hash key (asynq:{queue}:t:{task_id})
--- KEYS[2]: 聚合组 ZSet key (asynq:{queue}:aggregation:{gname})
--- KEYS[3]: 全局组集合 key (asynq:{queue}:groups)
--- KEYS[4]: 唯一键 key (asynq:{queue}:unique:{type}:{hash})
+-- KEYS[1]: 任务数据 Hash key (asyrq:{queue}:t:{task_id})
+-- KEYS[2]: 聚合组 ZSet key (asyrq:{queue}:aggregation:{gname})
+-- KEYS[3]: 全局组集合 key (asyrq:{queue}:groups)
+-- KEYS[4]: 唯一键 key (asyrq:{queue}:unique:{type}:{hash})
 -- ARGV[1]: 任务消息 JSON
 -- ARGV[2]: 任务 ID
 -- ARGV[3]: 组名

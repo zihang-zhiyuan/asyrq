@@ -46,7 +46,7 @@
 | **中间件** | 洋葱模型，支持日志、重试、超时等横切关注点 |
 | **路由匹配** | 精确匹配 + 前缀匹配 + catch-all 兜底 |
 | **结果存储** | 自动 / 自定义 ResultKey / 保留期清理 |
-| **监控** | 兼容 [asynqmon](https://github.com/hibiken/asynqmon) Web 面板 |
+| **监控** | 全部 key 使用 `asyrq:` 前缀（任务: `asyrq:tasks:{type}:{route}:{queue}`，服务器: `asyrq:servers`） |
 | **连接** | 单节点 / 哨兵 / 集群 / URI 解析 |
 | **API 风格** | FastAPI 风格 `@app.task()` 装饰器 |
 
@@ -123,8 +123,11 @@ async def handle_email(ctx: Context, task: Task):
     print(f"发送邮件: {data['to']}")
 
     # 写入结果 — 自动存到 email:send:result:{task_id}
-    writer = task.result_writer()
-    await writer.write(json.dumps({"status": "ok"}).encode())
+    # 上报中间状态（实时写入 Redis，1 小时过期）
+    await task.update_state({"step": "sending", "to": data["to"]})
+
+    # 写入最终结果 -> 自动存到 email:send:result:{task_id}
+    await task.finish({"status": "ok", "to": data["to"]})
 
 asyncio.run(app.run())  # 阻塞，Ctrl+C 优雅退出
 ```
@@ -379,36 +382,42 @@ await client.enqueue(Task("data:ingest", payload2), Group("batch"))
 # → 自动聚合成一个 Task("batch:process", merged_payload)
 ```
 
-## 结果获取
+## 结果与状态
 
-```python
-import asyncio, json
-from asyrq import Client, Task, ResultKey
+### 两套 API（都立即写入 Redis）
 
-client = Client(redis_opt)
-task_id = (await client.enqueue(Task("email:send", payload))).id
-
-# 生产者侧获取结果
-import redis.asyncio as redis
-r = redis.Redis()
-result_key = f"email:send:result:{task_id}"  # 默认格式
-result = await r.get(result_key)
-if result:
-    print(json.loads(result))
-
-# 或自定义 key
-await client.enqueue(Task("email:send", payload), ResultKey("my:result"))
-result = await r.get("my:result")
-```
-
-消费者侧写入：
+| 方法 | Redis Key | TTL | 用途 |
+|------|----------|-----|------|
+| `task.update_state(dict)` | `{type}:state:{id}` | 1 小时 | 处理中实时上报状态 |
+| `task.finish(dict)` | `{type}:result:{id}` | 永久 | 最终结果 |
 
 ```python
 @app.task("email:send")
 async def handle_email(ctx, task):
-    writer = task.result_writer()
-    await writer.write(json.dumps({"status": "ok", "id": 42}).encode())
-    # 自动存到 email:send:result:{task_id}
+    # 处理中：多次上报状态
+    await task.update_state({"step": "fetching", "pct": 30})
+    await task.update_state({"step": "parsing", "pct": 80})
+
+    # 完成：写入最终结果
+    await task.finish({"status": "ok", "items": items})
+```
+
+查询：
+
+```python
+import redis.asyncio as redis
+r = redis.Redis(...)
+
+# 查实时状态
+state = await r.get(f"email:send:state:{task_id}")
+
+# 查最终结果（读后自行 DEL）
+result = await r.get(f"email:send:result:{task_id}")
+await r.delete(f"email:send:result:{task_id}")
+
+# 或自定义 key
+await client.enqueue(Task("email:send", payload), ResultKey("my:result"))
+result = await r.get("my:result")  # 读 my:result:{task_id}
 ```
 
 ## 配置参考
@@ -466,24 +475,21 @@ async def handle_email(ctx, task):
 │ (定时器) │     └───────────────────────────────┘     │  ├─ recoverer          │
 └──────────┘                                           │  ├─ janitor            │
                                                        │  ├─ healthcheck        │
-Redis 数据结构:                                         │  └─ aggregator         │
-  asynq:{queue}:pending     → List   (即时任务)         │                        │
-  asynq:{queue}:scheduled   → ZSet   (定时任务)         │  并发模型:              │
-  asynq:{queue}:retry       → ZSet   (重试任务)         │  Semaphore + asyncio   │
-  asynq:{queue}:t:{id}      → Hash   (任务数据)         │  优雅退出 → 清理注册    │
-  asynq:{queue}:completed   → ZSet   (已完成)           └────────────────────────┘
-  asynq:servers             → ZSet   (服务器心跳)
+Redis 数据结构（任务 key 前缀: asyrq:tasks:{task_type}:{route}:{queue}）:  │  └─ aggregator  │
+  asyrq:tasks:{type}:{route}:{queue}:pending    → List   (即时任务)  │                   │
+  asyrq:tasks:{type}:{route}:{queue}:scheduled  → ZSet   (定时任务)  │  并发模型:         │
+  asyrq:tasks:{type}:{route}:{queue}:retry      → ZSet   (重试任务)  │  Semaphore+asyncio │
+  asyrq:tasks:{type}:{route}:{queue}:{id}       → Hash   (任务数据)  │  优雅退出→清理注册  │
+  asyrq:tasks:{type}:{route}:{queue}:completed  → ZSet   (已完成)    └───────────────────┘
+  asyrq:servers                                 → ZSet   (服务器心跳)
 ```
 
 ## 监控
 
-完全兼容 [asynqmon](https://github.com/hibiken/asynqmon) Web 监控面板：
-
-```bash
-docker run -p 8080:8080 hibiken/asynqmon --redis-addr=host.docker.internal:6379
-```
-
-打开 `http://localhost:8080` 即可查看队列状态、服务器信息、任务统计。
+> 注意：所有 Redis key 均使用 `asyrq:` 前缀（任务: `asyrq:tasks:...`，
+> 服务器心跳/队列注册: `asyrq:servers` / `asyrq:queues` 等），
+> 与 Go asynq 的 `asynq:` 键名不同，因此 [asynqmon](https://github.com/hibiken/asynqmon)
+> 等按 `asynq:` 前缀扫描的监控工具不适用于本项目。
 
 ## 与 Go asynq 对照
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import List
 
 from .internal import timeutil as _timeutil
 from .internal.base import DEFAULT_MAX_RETRY, DEFAULT_QUEUE_NAME, DEFAULT_TIMEOUT

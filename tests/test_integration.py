@@ -101,7 +101,7 @@ class TestServerIntegration:
         processed = []
 
         async def my_handler(ctx, task):
-            data = json.loads(task.payload().decode())
+            data = json.loads(task.payload.decode())
             processed.append(data)
 
         # 创建 Server

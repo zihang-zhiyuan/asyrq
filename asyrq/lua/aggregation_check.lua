@@ -1,6 +1,6 @@
 -- aggregation_check.lua — 任务组聚合检查脚本
 -- 检查聚合组是否满足触发条件，将任务从组中取出准备聚合
--- KEYS[1]: 聚合组 ZSet key (asynq:{queue}:g:{group_name})
+-- KEYS[1]: 聚合组 ZSet key (asyrq:{queue}:g:{group_name})
 -- ARGV[1]: 当前时间（纳秒时间戳）
 -- ARGV[2]: 聚合组名
 -- ARGV[3]: 最大延迟（秒）

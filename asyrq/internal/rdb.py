@@ -2,7 +2,7 @@
 # 封装所有 Redis 操作，使用 Lua 脚本保证原子性，1:1 对应 Go asynq 的 internal/rdb 包
 
 from __future__ import annotations
-from typing import Any
+from typing import Any, Dict, List, Optional
 import json as _json
 import os as _os
 import uuid as _uuid
@@ -14,9 +14,11 @@ from .base import (
     Broker, TaskMessage, TaskState, ServerInfo,
     DEFAULT_QUEUE_NAME, DEFAULT_MAX_RETRY,
     ALL_QUEUES_KEY, SERVERS_KEY,
+    split_typename,
     pending_key, active_key, scheduled_key, retry_key, archived_key, completed_key,
     task_key, paused_key, lease_key, group_key, all_groups_key,
-    unique_key, workers_key, servers_key,
+    unique_key, workers_key, servers_key, processed_key, failed_key,
+    server_info_key, scheduler_key, scheduler_history_key, REDIS_PREFIX,
     QUEUE_PAUSED_TTL, LEASE_DURATION, UNIQUE_LOCK_TTL,
 )
 from .log import Logger, DefaultLogger, LogLevel
@@ -147,8 +149,9 @@ class RDB(Broker):
         await self._add_queue_to_set(msg.queue)
 
         # 准备 Lua 脚本参数
-        tkey = task_key(msg.queue, task_id)   # 任务 Hash key
-        pkey = pending_key(msg.queue)          # pending 列表 key
+        task_type, route = split_typename(msg.type)
+        tkey = task_key(task_type, route, msg.queue, task_id)   # 任务 Hash key
+        pkey = pending_key(task_type, route, msg.queue)          # pending 列表 key
         now = self._now_nsec()                 # 当前纳秒时间戳
 
         # 执行原子入队 Lua 脚本
@@ -180,10 +183,11 @@ class RDB(Broker):
         await self._add_queue_to_set(msg.queue)
 
         # 计算唯一键
-        ukey = unique_key(msg.queue, msg.type, msg.payload)
+        task_type, route = split_typename(msg.type)
+        ukey = unique_key(task_type, route, msg.queue, msg.payload)
 
-        tkey = task_key(msg.queue, task_id)
-        pkey = pending_key(msg.queue)
+        tkey = task_key(task_type, route, msg.queue, task_id)
+        pkey = pending_key(task_type, route, msg.queue)
         now = self._now_nsec()
 
         result = await _get_lua_script("enqueue_unique")(
@@ -211,8 +215,9 @@ class RDB(Broker):
 
         await self._add_queue_to_set(msg.queue)
 
-        tkey = task_key(msg.queue, task_id)
-        skey = scheduled_key(msg.queue)
+        task_type, route = split_typename(msg.type)
+        tkey = task_key(task_type, route, msg.queue, task_id)
+        skey = scheduled_key(task_type, route, msg.queue)
 
         result = await _get_lua_script("schedule")(
             keys=[tkey, skey],
@@ -240,9 +245,10 @@ class RDB(Broker):
 
         await self._add_queue_to_set(msg.queue)
 
-        ukey = unique_key(msg.queue, msg.type, msg.payload)
-        tkey = task_key(msg.queue, task_id)
-        skey = scheduled_key(msg.queue)
+        task_type, route = split_typename(msg.type)
+        ukey = unique_key(task_type, route, msg.queue, msg.payload)
+        tkey = task_key(task_type, route, msg.queue, task_id)
+        skey = scheduled_key(task_type, route, msg.queue)
 
         result = await _get_lua_script("schedule_unique")(
             keys=[tkey, skey, ukey],
@@ -258,13 +264,20 @@ class RDB(Broker):
     # 任务出队
     # ========================================================================
 
-    async def dequeue(self, queues: List[str], strict_priority: bool, weights: Optional[dict[str, int] ]= None) -> Optional[TaskMessage]:
+    async def dequeue(
+        self,
+        task_routes: List[str],
+        queues: List[str],
+        strict_priority: bool,
+        weights: Optional[dict[str, int]] = None,
+    ) -> Optional[TaskMessage]:
         """从队列中取出一个待处理任务。
 
-        使用加权随机选择队列（按 Config.queues 中的权重比例分配），
-        然后通过 Lua 脚本原子地出队。
+        key 布局为 asyrq:tasks:{task_type}:{route}:{queue}:{suffix}，
+        因此按「路由 × 队列」组合逐个尝试出队。
 
         Args:
+            task_routes: 服务器注册的路由列表（如 "pmos_liaoning:rqdj"）
             queues: 按优先级排序的队列名列表
             strict_priority: 严格优先级模式
             weights: 队列权重映射 {queue_name: priority}，用于加权随机选择
@@ -274,34 +287,44 @@ class RDB(Broker):
         """
         import random as _random
 
-        if not queues:
-            return None  # 没有队列可供出队
+        if not task_routes or not queues:
+            return None  # 没有路由或队列可供出队
 
-        # 对于严格优先级，按顺序检查每个队列
+        route_pairs = [split_typename(r) for r in task_routes]
+
+        # 对于严格优先级，按队列顺序、再按路由顺序检查
         if strict_priority:
             for qname in queues:
-                msg = await self._try_dequeue_one(qname)
-                if msg:
-                    return msg
+                for task_type, route in route_pairs:
+                    msg = await self._try_dequeue_one(task_type, route, qname)
+                    if msg:
+                        return msg
         else:
             # 加权优先级：按权重随机选择队列，逐个尝试直到找到任务
             if weights:
-                queue_list = [q for q in queues if q in weights] or queues
-                weight_list = [weights.get(q, 1) for q in queue_list]
+                # 权重为 0 的队列不参与消费
+                queue_list = [q for q in queues if weights.get(q, 0) > 0]
+                if queue_list:
+                    weight_list = [weights[q] for q in queue_list]
+                else:
+                    # 全部权重 <= 0 时退化为等权随机
+                    queue_list = list(queues)
+                    weight_list = [1] * len(queue_list)
                 # 记录已尝试的空队列，全部为空时才返回 None
                 tried: set = set()
                 while len(tried) < len(queue_list):
                     # 从未尝试的队列中按权重随机选择
                     available = [(q, w) for q, w in zip(queue_list, weight_list) if q not in tried]
                     total_w = sum(w for _, w in available)
-                    r = _random.randint(1, total_w)
+                    r = _random.randint(1, max(1, total_w))
                     cumulative = 0
                     for qname, w in available:
                         cumulative += w
                         if r <= cumulative:
-                            msg = await self._try_dequeue_one(qname)
-                            if msg:
-                                return msg
+                            for task_type, route in route_pairs:
+                                msg = await self._try_dequeue_one(task_type, route, qname)
+                                if msg:
+                                    return msg
                             tried.add(qname)  # 该队列为空，标记并继续尝试
                             break
             else:
@@ -309,29 +332,33 @@ class RDB(Broker):
                 shuffled = list(queues)
                 _random.shuffle(shuffled)
                 for qname in shuffled:
-                    msg = await self._try_dequeue_one(qname)
-                    if msg:
-                        return msg
+                    for task_type, route in route_pairs:
+                        msg = await self._try_dequeue_one(task_type, route, qname)
+                        if msg:
+                            return msg
 
-        return None  # 所有队列都为空
+        return None  # 所有组合都为空
 
-    async def _try_dequeue_one(self, qname: str) -> Optional[TaskMessage]:
-        """从单个队列尝试出队一个任务。
+    async def _try_dequeue_one(self, task_type: str, route: str, qname: str) -> Optional[TaskMessage]:
+        """从单个 (task_type, route, queue) 组合尝试出队一个任务。
 
         Args:
+            task_type: 任务类型（如 "pmos_liaoning"）
+            route: 路由（如 "rqdj"）
             qname: 队列名
 
         Returns:
             Optional[TaskMessage]: 出队的任务消息，队列为空时返回 None
         """
-        pkey = pending_key(qname)       # pending 列表 key
-        akey = active_key(qname)         # active 列表 key
-        lkey = lease_key(qname)          # lease hash key
+        pkey = pending_key(task_type, route, qname)       # pending 列表 key
+        akey = active_key(task_type, route, qname)         # active 列表 key
+        lkey = lease_key(task_type, route, qname)          # lease hash key
+        pauskey = paused_key(task_type, route, qname)      # 暂停标记 key
         now = self._now_nsec()           # 当前纳秒时间戳
 
         # 执行出队 Lua 脚本
         task_id = await _get_lua_script("dequeue")(
-            keys=[pkey, akey, lkey],
+            keys=[pkey, akey, lkey, pauskey],
             args=[str(now), str(LEASE_DURATION), "0"],  # 非严格优先级
         )
 
@@ -340,7 +367,7 @@ class RDB(Broker):
 
         # 读取任务数据
         task_id_str = task_id.decode("utf-8") if isinstance(task_id, bytes) else task_id
-        tkey = task_key(qname, task_id_str)
+        tkey = task_key(task_type, route, qname, task_id_str)
         data = await self._client.hget(tkey, "msg")  # 从 Hash 中获取 msg 字段
 
         if not data:
@@ -360,11 +387,12 @@ class RDB(Broker):
         Args:
             msg: 已完成的任务消息
         """
-        akey = active_key(msg.queue)
-        lkey = lease_key(msg.queue)
-        tkey = task_key(msg.queue, msg.id)
-        ckey = completed_key(msg.queue)
-        pckey = f"asynq:{{{msg.queue}}}:processed"  # 已处理计数器
+        task_type, route = split_typename(msg.type)
+        akey = active_key(task_type, route, msg.queue)
+        lkey = lease_key(task_type, route, msg.queue)
+        tkey = task_key(task_type, route, msg.queue, msg.id)
+        ckey = completed_key(task_type, route, msg.queue)
+        pckey = processed_key(task_type, route, msg.queue)  # 已处理计数器
         now = self._now_nsec()
 
         await _get_lua_script("done")(
@@ -378,11 +406,12 @@ class RDB(Broker):
         Args:
             msg: 要标记为完成的任务消息
         """
-        akey = active_key(msg.queue)
-        lkey = lease_key(msg.queue)
-        tkey = task_key(msg.queue, msg.id)
-        ckey = completed_key(msg.queue)
-        pckey = f"asynq:{{{msg.queue}}}:processed"
+        task_type, route = split_typename(msg.type)
+        akey = active_key(task_type, route, msg.queue)
+        lkey = lease_key(task_type, route, msg.queue)
+        tkey = task_key(task_type, route, msg.queue, msg.id)
+        ckey = completed_key(task_type, route, msg.queue)
+        pckey = processed_key(task_type, route, msg.queue)
         now = self._now_nsec()
 
         # 获取 result 数据（如果有）
@@ -409,11 +438,12 @@ class RDB(Broker):
             error_msg: 错误消息
             is_failure: 是否计入失败统计
         """
-        akey = active_key(msg.queue)
-        lkey = lease_key(msg.queue)
-        rkey = retry_key(msg.queue)
-        tkey = task_key(msg.queue, msg.id)
-        fkey = f"asynq:{{{msg.queue}}}:failed"
+        task_type, route = split_typename(msg.type)
+        akey = active_key(task_type, route, msg.queue)
+        lkey = lease_key(task_type, route, msg.queue)
+        rkey = retry_key(task_type, route, msg.queue)
+        tkey = task_key(task_type, route, msg.queue, msg.id)
+        fkey = failed_key(task_type, route, msg.queue)
         now = self._now_nsec()
 
         await _get_lua_script("retry")(
@@ -428,11 +458,12 @@ class RDB(Broker):
             msg: 要归档的任务消息
             error_msg: 错误消息
         """
-        akey = active_key(msg.queue)
-        lkey = lease_key(msg.queue)
-        arkey = archived_key(msg.queue)
-        tkey = task_key(msg.queue, msg.id)
-        fkey = f"asynq:{{{msg.queue}}}:failed"
+        task_type, route = split_typename(msg.type)
+        akey = active_key(task_type, route, msg.queue)
+        lkey = lease_key(task_type, route, msg.queue)
+        arkey = archived_key(task_type, route, msg.queue)
+        tkey = task_key(task_type, route, msg.queue, msg.id)
+        fkey = failed_key(task_type, route, msg.queue)
         now = self._now_nsec()
 
         await _get_lua_script("archive")(
@@ -446,10 +477,11 @@ class RDB(Broker):
         Args:
             msg: 要重新入队的任务消息
         """
-        akey = active_key(msg.queue)
-        pkey = pending_key(msg.queue)
-        lkey = lease_key(msg.queue)
-        tkey = task_key(msg.queue, msg.id)
+        task_type, route = split_typename(msg.type)
+        akey = active_key(task_type, route, msg.queue)
+        pkey = pending_key(task_type, route, msg.queue)
+        lkey = lease_key(task_type, route, msg.queue)
+        tkey = task_key(task_type, route, msg.queue, msg.id)
 
         await _get_lua_script("requeue")(
             keys=[akey, pkey, lkey, tkey],
@@ -460,37 +492,41 @@ class RDB(Broker):
     # 任务前移
     # ========================================================================
 
-    async def forward_if_ready(self, queues: List[str]) -> None:
+    async def forward_if_ready(self, task_routes: List[str], queues: List[str]) -> None:
         """检查 scheduled 和 retry 集合，将到期任务前移到 pending 列表。
 
         Args:
+            task_routes: 服务器注册的路由列表
             queues: 要检查的队列名列表
         """
         now = self._now_nsec()
         batch_size = 100  # 每次最多前移 100 个任务
 
-        for qname in queues:
-            skey = scheduled_key(qname)   # scheduled ZSet
-            rkey = retry_key(qname)        # retry ZSet
-            pkey = pending_key(qname)      # pending 列表
+        for task_route in task_routes:
+            task_type, route = split_typename(task_route)
+            for qname in queues:
+                skey = scheduled_key(task_type, route, qname)   # scheduled ZSet
+                rkey = retry_key(task_type, route, qname)        # retry ZSet
+                pkey = pending_key(task_type, route, qname)      # pending 列表
 
-            # 执行前移 Lua 脚本
-            count = await _get_lua_script("forward")(
-                keys=[skey, rkey, pkey, qname],
-                args=[str(now), str(batch_size)],
-            )
+                # 执行前移 Lua 脚本（KEYS[4..6] 用于重建任务数据 key）
+                count = await _get_lua_script("forward")(
+                    keys=[skey, rkey, pkey, task_type, route, qname],
+                    args=[str(now), str(batch_size)],
+                )
 
-            if count and int(count) > 0:
-                self._logger.debug(f"前移 {count} 个到期任务, queue={qname}")
+                if count and int(count) > 0:
+                    self._logger.debug(f"前移 {count} 个到期任务: type={task_type} route={route} queue={qname}")
 
     # ========================================================================
     # 租约管理
     # ========================================================================
 
-    async def list_lease_expired(self, queues: List[str]) -> List[TaskMessage]:
+    async def list_lease_expired(self, task_routes: List[str], queues: List[str]) -> List[TaskMessage]:
         """列出所有租约到期的活跃任务（孤儿任务检测）。
 
         Args:
+            task_routes: 服务器注册的路由列表
             queues: 要检查的队列列表
 
         Returns:
@@ -500,37 +536,41 @@ class RDB(Broker):
         max_count = 50  # 每次最多返回 50 个
         expired_tasks = []
 
-        for qname in queues:
-            lkey = lease_key(qname)
+        for task_route in task_routes:
+            task_type, route = split_typename(task_route)
+            for qname in queues:
+                lkey = lease_key(task_type, route, qname)
 
-            task_ids = await _get_lua_script("list_lease_expired")(
-                keys=[lkey],
-                args=[str(now), str(max_count)],
-            )
+                task_ids = await _get_lua_script("list_lease_expired")(
+                    keys=[lkey],
+                    args=[str(now), str(max_count)],
+                )
 
-            if not task_ids:
-                continue
+                if not task_ids:
+                    continue
 
-            # 读取每个过期任务的数据
-            for tid in task_ids:
-                tid_str = tid.decode("utf-8") if isinstance(tid, bytes) else tid
-                tkey = task_key(qname, tid_str)
-                data = await self._client.hget(tkey, "msg")
-                if data:
-                    msg = TaskMessage.from_json(data.decode("utf-8"))
-                    expired_tasks.append(msg)
+                # 读取每个过期任务的数据
+                for tid in task_ids:
+                    tid_str = tid.decode("utf-8") if isinstance(tid, bytes) else tid
+                    tkey = task_key(task_type, route, qname, tid_str)
+                    data = await self._client.hget(tkey, "msg")
+                    if data:
+                        msg = TaskMessage.from_json(data.decode("utf-8"))
+                        expired_tasks.append(msg)
 
         return expired_tasks
 
-    async def extend_lease(self, qname: str, task_ids: List[str], lease_seconds: int) -> None:
+    async def extend_lease(self, task_type: str, route: str, qname: str, task_ids: List[str], lease_seconds: int) -> None:
         """延长任务的活动租约。
 
         Args:
+            task_type: 任务类型（如 "pmos_liaoning"）
+            route: 路由（如 "rqdj"）
             qname: 队列名
             task_ids: 需要延长租约的任务 ID 列表
             lease_seconds: 租约延长秒数
         """
-        lkey = lease_key(qname)
+        lkey = lease_key(task_type, route, qname)
         now = self._now_nsec()
         lease_until = now + lease_seconds * 1_000_000_000  # 新的租约到期时间
 
@@ -604,7 +644,7 @@ class RDB(Broker):
         servers = []
         for sid in server_ids:
             sid_str = sid.decode("utf-8") if isinstance(sid, bytes) else sid
-            skey_detail = f"asynq:servers:{sid_str}"
+            skey_detail = server_info_key(sid_str)
             data = await self._client.get(skey_detail)
             if data:
                 info_dict = _json.loads(data.decode("utf-8"))
@@ -616,17 +656,19 @@ class RDB(Broker):
     # 任务信息查询
     # ========================================================================
 
-    async def get_task_info(self, qname: str, task_id: str) -> Optional[dict[str, Any]]:
+    async def get_task_info(self, task_type: str, route: str, qname: str, task_id: str) -> Optional[dict[str, Any]]:
         """获取指定任务的完整信息。
 
         Args:
+            task_type: 任务类型
+            route: 路由
             qname: 队列名
             task_id: 任务 ID
 
         Returns:
             Optional[dict[str, Any]]: 任务信息字典
         """
-        tkey = task_key(qname, task_id)
+        tkey = task_key(task_type, route, qname, task_id)
         data = await self._client.hgetall(tkey)  # 获取所有 Hash 字段
 
         if not data:
@@ -648,11 +690,13 @@ class RDB(Broker):
         return info
 
     async def list_tasks(
-        self, qname: str, state: TaskState, page_size: int = 100, page_num: int = 1
+        self, task_type: str, route: str, qname: str, state: TaskState, page_size: int = 100, page_num: int = 1
     ) -> List[dict[str, Any]]:
         """分页列出指定状态的任务。
 
         Args:
+            task_type: 任务类型
+            route: 路由
             qname: 队列名
             state: 任务状态
             page_size: 每页数量
@@ -663,12 +707,12 @@ class RDB(Broker):
         """
         # 根据状态选择 key
         key_map = {
-            TaskState.PENDING: pending_key(qname),
-            TaskState.ACTIVE: active_key(qname),
-            TaskState.SCHEDULED: scheduled_key(qname),
-            TaskState.RETRY: retry_key(qname),
-            TaskState.ARCHIVED: archived_key(qname),
-            TaskState.COMPLETED: completed_key(qname),
+            TaskState.PENDING: pending_key(task_type, route, qname),
+            TaskState.ACTIVE: active_key(task_type, route, qname),
+            TaskState.SCHEDULED: scheduled_key(task_type, route, qname),
+            TaskState.RETRY: retry_key(task_type, route, qname),
+            TaskState.ARCHIVED: archived_key(task_type, route, qname),
+            TaskState.COMPLETED: completed_key(task_type, route, qname),
         }
         key = key_map.get(state)
         if not key:
@@ -690,7 +734,7 @@ class RDB(Broker):
         tasks = []
         for tid in task_ids:
             tid_str = tid.decode("utf-8") if isinstance(tid, bytes) else tid
-            info = await self.get_task_info(qname, tid_str)
+            info = await self.get_task_info(task_type, route, qname, tid_str)
             if info:
                 info["id"] = tid_str
                 tasks.append(info)
@@ -713,28 +757,34 @@ class RDB(Broker):
             for q in queues_data
         ]
 
-    async def pause_queue(self, qname: str) -> None:
+    async def pause_queue(self, task_type: str, route: str, qname: str) -> None:
         """暂停指定队列的处理。
 
         Args:
+            task_type: 任务类型
+            route: 路由
             qname: 队列名
         """
-        pkey = paused_key(qname)
+        pkey = paused_key(task_type, route, qname)
         await self._client.set(pkey, "1", ex=QUEUE_PAUSED_TTL)  # SET with TTL
 
-    async def unpause_queue(self, qname: str) -> None:
+    async def unpause_queue(self, task_type: str, route: str, qname: str) -> None:
         """恢复指定队列的处理。
 
         Args:
+            task_type: 任务类型
+            route: 路由
             qname: 队列名
         """
-        pkey = paused_key(qname)
+        pkey = paused_key(task_type, route, qname)
         await self._client.delete(pkey)  # 删除暂停标记
 
-    async def delete_queue(self, qname: str, force: bool = False) -> None:
+    async def delete_queue(self, task_type: str, route: str, qname: str, force: bool = False) -> None:
         """删除队列及其所有任务。
 
         Args:
+            task_type: 任务类型
+            route: 路由
             qname: 队列名
             force: 是否强制删除（包含有活跃任务的队列）
 
@@ -743,17 +793,17 @@ class RDB(Broker):
         """
         if not force:
             # 先检查是否有活跃任务
-            akey = active_key(qname)
+            akey = active_key(task_type, route, qname)
             active_count = await self._client.llen(akey)
             if active_count > 0:
                 raise Exception(f"队列 {qname} 有 {active_count} 个活跃任务，请使用 force=True")
 
         # 删除队列相关的所有 Redis key
         keys_to_delete = [
-            pending_key(qname), active_key(qname),
-            scheduled_key(qname), retry_key(qname),
-            archived_key(qname), completed_key(qname),
-            paused_key(qname), lease_key(qname),
+            pending_key(task_type, route, qname), active_key(task_type, route, qname),
+            scheduled_key(task_type, route, qname), retry_key(task_type, route, qname),
+            archived_key(task_type, route, qname), completed_key(task_type, route, qname),
+            paused_key(task_type, route, qname), lease_key(task_type, route, qname),
         ]
 
         # 使用 pipeline 批量删除
@@ -765,10 +815,12 @@ class RDB(Broker):
         # 从全局队列集合中移除
         await self._client.srem(ALL_QUEUES_KEY, qname)
 
-    async def current_queue_stats(self, qname: str) -> Dict[str, int]:
+    async def current_queue_stats(self, task_type: str, route: str, qname: str) -> Dict[str, int]:
         """获取队列统计信息。
 
         Args:
+            task_type: 任务类型
+            route: 路由
             qname: 队列名
 
         Returns:
@@ -776,12 +828,12 @@ class RDB(Broker):
         """
         # 并行获取各状态的计数
         pipe = self._client.pipeline()
-        pipe.llen(pending_key(qname))       # pending 数量
-        pipe.llen(active_key(qname))         # active 数量
-        pipe.zcard(scheduled_key(qname))     # scheduled 数量
-        pipe.zcard(retry_key(qname))          # retry 数量
-        pipe.zcard(archived_key(qname))       # archived 数量
-        pipe.zcard(completed_key(qname))      # completed 数量
+        pipe.llen(pending_key(task_type, route, qname))       # pending 数量
+        pipe.llen(active_key(task_type, route, qname))         # active 数量
+        pipe.zcard(scheduled_key(task_type, route, qname))     # scheduled 数量
+        pipe.zcard(retry_key(task_type, route, qname))          # retry 数量
+        pipe.zcard(archived_key(task_type, route, qname))       # archived 数量
+        pipe.zcard(completed_key(task_type, route, qname))      # completed 数量
         results = await pipe.execute()        # 执行所有命令
 
         return {
@@ -812,8 +864,10 @@ class RDB(Broker):
 
         await self._add_queue_to_set(msg.queue)
 
+        task_type, route = split_typename(msg.type)
+
         # 写入任务数据
-        tkey = task_key(msg.queue, task_id)
+        tkey = task_key(task_type, route, msg.queue, task_id)
         await self._client.hset(tkey, mapping={
             "msg": msg.to_json(),
             "state": "aggregating",
@@ -821,12 +875,12 @@ class RDB(Broker):
         })
 
         # 添加到聚合组 ZSet
-        gkey = group_key(msg.queue, gname)
+        gkey = group_key(task_type, route, msg.queue, gname)
         now = self._now_nsec()
         await self._client.zadd(gkey, {task_id: now})
 
         # 将组名加入全局组集合
-        agkey = all_groups_key(msg.queue)
+        agkey = all_groups_key(task_type, route, msg.queue)
         await self._client.sadd(agkey, gname)
 
         return task_id
@@ -847,10 +901,11 @@ class RDB(Broker):
 
         await self._add_queue_to_set(msg.queue)
 
-        ukey = unique_key(msg.queue, msg.type, msg.payload)
-        tkey = task_key(msg.queue, task_id)
-        gkey = group_key(msg.queue, gname)
-        agkey = all_groups_key(msg.queue)
+        task_type, route = split_typename(msg.type)
+        ukey = unique_key(task_type, route, msg.queue, msg.payload)
+        tkey = task_key(task_type, route, msg.queue, task_id)
+        gkey = group_key(task_type, route, msg.queue, gname)
+        agkey = all_groups_key(task_type, route, msg.queue)
         now = self._now_nsec()
 
         result = await _get_lua_script("add_to_group_unique")(
@@ -863,16 +918,18 @@ class RDB(Broker):
 
         return task_id
 
-    async def list_groups(self, qname: str) -> List[str]:
+    async def list_groups(self, task_type: str, route: str, qname: str) -> List[str]:
         """列出队列中所有聚合组名。
 
         Args:
+            task_type: 任务类型
+            route: 路由
             qname: 队列名
 
         Returns:
             list[str]: 组名列表
         """
-        agkey = all_groups_key(qname)
+        agkey = all_groups_key(task_type, route, qname)
         groups = await self._client.smembers(agkey)
         return [
             g.decode("utf-8") if isinstance(g, bytes) else g
@@ -880,11 +937,13 @@ class RDB(Broker):
         ]
 
     async def aggregation_check(
-        self, qname: str, gname: str, max_delay: int, max_size: int, grace_period: int
-    ) -> Optional[str]:
+        self, task_type: str, route: str, qname: str, gname: str, max_delay: int, max_size: int, grace_period: int
+    ) -> Optional[List[str]]:
         """检查聚合组是否应该被触发。
 
         Args:
+            task_type: 任务类型
+            route: 路由
             qname: 队列名
             gname: 组名
             max_delay: 最大延迟
@@ -892,9 +951,10 @@ class RDB(Broker):
             grace_period: 宽限期
 
         Returns:
-            Optional[str]: 聚合锁 key（触发时），None 表示不需要触发
+            Optional[List[str]]: 触发时返回组内任务 ID 列表（组已被原子取出），
+                                 None 表示暂不需要触发
         """
-        gkey = group_key(qname, gname)
+        gkey = group_key(task_type, route, qname, gname)
         now = self._now_nsec()
 
         result = await _get_lua_script("aggregation_check")(
@@ -903,10 +963,11 @@ class RDB(Broker):
         )
 
         if result:
-            # 设置了聚合锁，返回锁 key
-            lock_key = f"asynq:qname:aggregation_lock:{gname}"
-            await self._client.set(lock_key, "1", ex=30)  # 30 秒锁
-            return lock_key
+            # Lua 已原子删除组 ZSet 并返回任务 ID 列表
+            return [
+                t.decode("utf-8") if isinstance(t, bytes) else t
+                for t in result
+            ]
 
         return None
 
@@ -923,7 +984,7 @@ class RDB(Broker):
         """
         pipe = self._client.pipeline()
         for entry in entries:
-            skey = f"asynq:schedulers:{entry['id']}"
+            skey = scheduler_key(entry["id"])
             pipe.set(skey, _json.dumps(entry, ensure_ascii=False), ex=ttl)
         await pipe.execute()
 
@@ -938,7 +999,7 @@ class RDB(Broker):
         entries = []
         while True:
             cursor, keys = await self._client.scan(
-                cursor, match="asynq:schedulers:*", count=100
+                cursor, match=f"{REDIS_PREFIX}:schedulers:*", count=100
             )
             for key in keys:
                 data = await self._client.get(key)
@@ -955,7 +1016,7 @@ class RDB(Broker):
             entry_id: 调度器条目 ID
             task_id: 入队的任务 ID
         """
-        hkey = f"asynq:scheduler_history:{entry_id}"
+        hkey = scheduler_history_key(entry_id)
         now = self._now_nsec()
         await self._client.zadd(hkey, {task_id: now})  # 添加到历史 ZSet
 

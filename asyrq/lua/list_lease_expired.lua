@@ -1,6 +1,6 @@
 -- list_lease_expired.lua — 列出过期租约脚本
 -- 查找所有租约到期的 active 任务（孤儿任务检测）
--- KEYS[1]: lease hash key (asynq:{queue}:lease)
+-- KEYS[1]: lease hash key (asyrq:{queue}:lease)
 -- ARGV[1]: 当前时间（纳秒时间戳）
 -- ARGV[2]: 最大返回数量
 

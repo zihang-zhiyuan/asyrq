@@ -15,8 +15,6 @@ class TestConfig:
         """测试默认配置。"""
         config = Config()
         assert config.concurrency > 0
-        assert DEFAULT_QUEUE_NAME in config.queues
-        assert config.queues[DEFAULT_QUEUE_NAME] == 1
         assert config.strict_priority is False
         assert config.shutdown_timeout == 8
 
@@ -24,12 +22,10 @@ class TestConfig:
         """测试自定义配置。"""
         config = Config(
             concurrency=5,
-            queues={"critical": 6, "default": 3, "low": 1},
             strict_priority=True,
             group_max_size=50,
         )
         assert config.concurrency == 5
-        assert config.queues["critical"] == 6
         assert config.strict_priority is True
         assert config.group_max_size == 50
 

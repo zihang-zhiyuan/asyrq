@@ -84,8 +84,8 @@ async def test_task_and_options():
 
     # 1.1 基本任务创建
     task = Task("email:send", b'{"to":"a@b.com"}')
-    check("创建基本任务", task.type() == "email:send")
-    check("任务负载", task.payload() == b'{"to":"a@b.com"}')
+    check("创建基本任务", task.type == "email:send")
+    check("任务负载", task.payload == b'{"to":"a@b.com"}')
     check("result_writer 为空", task.result_writer() is None)
 
     # 1.2 空类型名应报错
@@ -97,12 +97,12 @@ async def test_task_and_options():
 
     # 1.3 带请求头的任务
     task = Task("test", b"data", headers={"x-id": "123"})
-    check("任务请求头", task.headers() == {"x-id": "123"})
+    check("任务请求头", task.headers == {"x-id": "123"})
 
     # 1.4 new_task 工厂函数
     from asyrq import new_task
     task = new_task("report:gen", b"payload")
-    check("new_task 工厂", task.type() == "report:gen")
+    check("new_task 工厂", task.type == "report:gen")
 
     # 1.5 选项
     check("MaxRetry(5)", MaxRetry(5).max_retry_count() == 5)
@@ -332,7 +332,7 @@ async def test_server_process():
     result_holder = {}
 
     async def my_handler(ctx, task):
-        result_holder[task.type()] = task.payload().decode()
+        result_holder[task.type] = task.payload.decode()
 
     mux = ServeMux()
     mux.handle_func("test:server", my_handler)
@@ -433,7 +433,7 @@ async def test_retry_and_skip():
     # 验证任务已归档
     r = get_raw_redis()
     broker = RDB(r)
-    stats = await broker.current_queue_stats("default")
+    stats = await broker.current_queue_stats("test", "skip", "default")
     check("归档计数≥1", stats["archived"] >= 1)
     await r.aclose()
 
@@ -597,27 +597,27 @@ async def test_redis_keys():
         unique_key, ALL_QUEUES_KEY, SERVERS_KEY,
     )
 
-    check("pending key", pending_key("q") == "asynq:q:pending")
-    check("active key", active_key("q") == "asynq:q:active")
-    check("scheduled key", scheduled_key("q") == "asynq:q:scheduled")
-    check("retry key", retry_key("q") == "asynq:q:retry")
-    check("archived key", archived_key("q") == "asynq:q:archived")
-    check("completed key", completed_key("q") == "asynq:q:completed")
-    check("task key", task_key("q", "id1") == "asynq:q:t:id1")
-    check("paused key", paused_key("q") == "asynq:q:paused")
-    check("lease key", lease_key("q") == "asynq:q:lease")
-    check("group key", group_key("q", "g") == "asynq:q:aggregation:g")
-    check("all groups", all_groups_key("q") == "asynq:q:groups")
-    check("all queues", all_queues_key() == "asynq:queues")
-    check("servers", servers_key() == "asynq:servers")
-    check("workers", workers_key("h", 1, "s") == "asynq:workers:h:1:s")
+    check("pending key", pending_key("t", "r", "q") == "asyrq:tasks:t:r:q:pending")
+    check("active key", active_key("t", "r", "q") == "asyrq:tasks:t:r:q:active")
+    check("scheduled key", scheduled_key("t", "r", "q") == "asyrq:tasks:t:r:q:scheduled")
+    check("retry key", retry_key("t", "r", "q") == "asyrq:tasks:t:r:q:retry")
+    check("archived key", archived_key("t", "r", "q") == "asyrq:tasks:t:r:q:archived")
+    check("completed key", completed_key("t", "r", "q") == "asyrq:tasks:t:r:q:completed")
+    check("task key", task_key("t", "r", "q", "id1") == "asyrq:tasks:t:r:q:id1")
+    check("paused key", paused_key("t", "r", "q") == "asyrq:tasks:t:r:q:paused")
+    check("lease key", lease_key("t", "r", "q") == "asyrq:tasks:t:r:q:lease")
+    check("group key", group_key("t", "r", "q", "g") == "asyrq:tasks:t:r:q:aggregation:g")
+    check("all groups", all_groups_key("t", "r", "q") == "asyrq:tasks:t:r:q:groups")
+    check("all queues", all_queues_key() == "asyrq:queues")
+    check("servers", servers_key() == "asyrq:servers")
+    check("workers", workers_key("h", 1, "s") == "asyrq:workers:h:1:s")
 
     import hashlib
     h = hashlib.sha256(b"test").hexdigest()
-    check("unique key", unique_key("q", "type", b"test") == f"asynq:q:unique:type:{h}")
+    check("unique key", unique_key("t", "r", "q", b"test") == f"asyrq:tasks:t:r:q:unique:{h}")
 
-    check("ALL_QUEUES_KEY 常量", ALL_QUEUES_KEY == "asynq:queues")
-    check("SERVERS_KEY 常量", SERVERS_KEY == "asynq:servers")
+    check("ALL_QUEUES_KEY 常量", ALL_QUEUES_KEY == "asyrq:queues")
+    check("SERVERS_KEY 常量", SERVERS_KEY == "asyrq:servers")
 
 
 # ============================================================
@@ -708,7 +708,7 @@ async def test_version():
     print("\n[20] 版本和导出")
     import asyrq
 
-    check("版本号存在", asyrq.__version__ == "0.1.0")
+    check("版本号存在", asyrq.__version__ == "0.1.2")
     check("ASYNQ_VERSION", asyrq.ASYNQ_VERSION == "0.1.0")
 
     expected = [

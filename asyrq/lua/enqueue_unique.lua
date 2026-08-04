@@ -2,7 +2,7 @@
 -- 在入队前检查唯一锁，防止重复创建相同任务
 -- KEYS[1]: 任务数据 Hash key
 -- KEYS[2]: pending 列表 key
--- KEYS[3]: 唯一锁 key (asynq:{queue}:unique:{type}:{payload_hash})
+-- KEYS[3]: 唯一锁 key (asyrq:{queue}:unique:{type}:{payload_hash})
 -- ARGV[1]: 序列化的 TaskMessage JSON
 -- ARGV[2]: 任务 ID
 -- ARGV[3]: 入队时间（纳秒时间戳）

@@ -2,9 +2,9 @@
 -- 将失败的任务从 active 移到 retry ZSet 中等待重试
 -- KEYS[1]: active list key
 -- KEYS[2]: lease hash key
--- KEYS[3]: retry ZSet key (asynq:{queue}:retry)
+-- KEYS[3]: retry ZSet key (asyrq:{queue}:retry)
 -- KEYS[4]: 任务数据 Hash key
--- KEYS[5]: failed 计数器 key (asynq:{queue}:failed)
+-- KEYS[5]: failed 计数器 key (asyrq:{queue}:failed)
 -- ARGV[1]: 任务 ID
 -- ARGV[2]: 下次重试时间（纳秒时间戳，作为 ZSet score）
 -- ARGV[3]: 错误消息

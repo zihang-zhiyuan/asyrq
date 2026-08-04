@@ -3,7 +3,9 @@
 -- KEYS[1]: scheduled ZSet key
 -- KEYS[2]: retry ZSet key
 -- KEYS[3]: pending list key
--- KEYS[4]: 队列名（用于构建任务数据 key）
+-- KEYS[4]: task_type（用于构建任务数据 key）
+-- KEYS[5]: route（用于构建任务数据 key）
+-- KEYS[6]: 队列名（用于构建任务数据 key）
 -- ARGV[1]: 当前时间（纳秒时间戳，用于 ZRANGEBYSCORE 上限）
 -- ARGV[2]: 每个 ZSet 每次前移的最大数量
 
@@ -22,7 +24,7 @@ for _, task_id in ipairs(scheduled_ids) do
     -- 添加到 pending
     redis.call("LPUSH", KEYS[3], task_id)
     -- 更新任务数据状态
-    local task_key = "asynq:" .. KEYS[4] .. ":t:" .. task_id
+    local task_key = "asyrq:tasks:" .. KEYS[4] .. ":" .. KEYS[5] .. ":" .. KEYS[6] .. ":" .. task_id
     redis.call("HSET", task_key, "state", "pending")
     moved_count = moved_count + 1
 end
@@ -39,7 +41,7 @@ if moved_count < batch_size then
         -- 添加到 pending
         redis.call("LPUSH", KEYS[3], task_id)
         -- 更新任务数据状态
-        local task_key = "asynq:" .. KEYS[4] .. ":t:" .. task_id
+        local task_key = "asyrq:tasks:" .. KEYS[4] .. ":" .. KEYS[5] .. ":" .. KEYS[6] .. ":" .. task_id
         redis.call("HSET", task_key, "state", "pending")
         moved_count = moved_count + 1
     end

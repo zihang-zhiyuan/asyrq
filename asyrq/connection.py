@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from urllib.parse import urlparse, parse_qs
+from typing import List, Optional
 import ssl as _ssl
 
 
@@ -71,6 +72,32 @@ class RedisClientOpt:
             kwargs["ssl"] = self.tls_config
         return _redis.Redis(**kwargs)
 
+    def make_sync_redis_client(self):
+        """创建同步 redis.Redis 客户端（用于 asyrq.sync）。"""
+        import redis as _redis
+        if ":" in self.addr:
+            host, port = self.addr.rsplit(":", 1)
+            port = int(port)
+        else:
+            host = self.addr
+            port = 6379
+
+        kwargs = {
+            "host": host, "port": port,
+            "username": self.username or None,
+            "password": self.password or None,
+            "db": self.db,
+            "socket_connect_timeout": self.dial_timeout,
+            "socket_timeout": self.read_timeout,
+            "socket_keepalive": True,
+            "max_connections": self.pool_size,
+            "retry_on_timeout": True,
+            "decode_responses": False,
+        }
+        if self.tls_config:
+            kwargs["ssl"] = self.tls_config
+        return _redis.Redis(**kwargs)
+
 
 @dataclass
 class RedisFailoverClientOpt:
@@ -102,7 +129,7 @@ class RedisFailoverClientOpt:
     # 连接池大小
     pool_size: int = 10
     # TLS 配置
-    tls_config: _ssl.Optional[SSLContext] = None
+    tls_config: Optional[_ssl.SSLContext] = None
 
     def make_redis_client(self):
         """根据 Sentinel 配置创建一个 redis.asyncio.Sentinel 客户端。
@@ -157,7 +184,7 @@ class RedisClusterClientOpt:
     # 写超时时间（秒）
     write_timeout: int = 3
     # TLS 配置
-    tls_config: _ssl.Optional[SSLContext] = None
+    tls_config: Optional[_ssl.SSLContext] = None
 
     def make_redis_client(self):
         """根据集群配置创建一个 redis.asyncio.RedisCluster 客户端。

@@ -13,8 +13,8 @@ class TestTask:
     def test_create_task_basic(self):
         """测试创建基本任务。"""
         task = Task("email:send", b'{"to": "test@test.com"}')
-        assert task.type() == "email:send"
-        assert task.payload() == b'{"to": "test@test.com"}'
+        assert task.type == "email:send"
+        assert task.payload == b'{"to": "test@test.com"}'
         assert task.result_writer() is None
 
     def test_create_task_with_empty_typename_raises(self):
@@ -25,13 +25,13 @@ class TestTask:
     def test_new_task_factory(self):
         """测试 new_task 工厂函数。"""
         task = new_task("report:generate", b"data")
-        assert task.type() == "report:generate"
-        assert task.payload() == b"data"
+        assert task.type == "report:generate"
+        assert task.payload == b"data"
 
     def test_task_with_headers(self):
         """测试带请求头的任务。"""
         task = Task("test", b"data", headers={"x-request-id": "123"})
-        assert task.headers() == {"x-request-id": "123"}
+        assert task.headers == {"x-request-id": "123"}
 
     def test_task_repr(self):
         """测试 __repr__ 格式。"""

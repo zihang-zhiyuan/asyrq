@@ -2,7 +2,7 @@
 # 提供基于 Cron 表达式的定时任务调度功能，1:1 对应 Go asynq 的 Scheduler
 
 from __future__ import annotations
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Dict, List, Optional
 import asyncio as _asyncio
 import uuid as _uuid
 import os as _os
@@ -134,7 +134,7 @@ class Scheduler:
         # 创建 Redis 客户端和 Broker
         self._redis = redis_conn.make_redis_client()
         self._broker = RDB(self._redis, self._logger)
-        self._client = Client(self._redis, self._logger)  # 内部 Client
+        self._client = Client(redis_client=self._redis, logger=self._logger)  # 内部 Client
 
         # 注册的条目映射 {entry_id: entry}
         self._entries: Dict[str, _SchedulerEntry] = {}

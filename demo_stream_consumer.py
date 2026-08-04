@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 
@@ -18,8 +19,10 @@ logger = logging.getLogger("demo.stream.consumer")
 # ---------------------------------------------------------------------------
 STREAM_KEY = "demo:orders"                # Stream 键名
 GROUP_NAME = "order-processors"           # 消费者组名称
-REDIS_URL = "redis://127.0.0.1:6380"      # Redis 地址
-REDIS_PASSWORD = "fastapiadmin_redis"     # Redis 密码
+# Redis 连接可用环境变量覆盖，便于本地手动测试:
+#   ASYRQ_REDIS_URL / ASYRQ_REDIS_PASSWORD
+REDIS_URL = os.getenv("ASYRQ_REDIS_URL", "redis://127.0.0.1:6380")
+REDIS_PASSWORD = os.getenv("ASYRQ_REDIS_PASSWORD", "fastapiadmin_redis")
 BLOCK_MS = 5000                           # XREADGROUP 阻塞等待时间（毫秒）
 BATCH_SIZE = 3                            # 每次批量拉取的消息数
 

@@ -1,89 +1,66 @@
-# task.py — Task 和 TaskInfo 模块
-# 定义任务的核心数据结构，1:1 对应 Go asynq 的 Task 和 TaskInfo 类型
-
+# task.py - Task 和 TaskInfo
 from __future__ import annotations
-from typing import Any
+
+import time as _time
+from typing import Any, Optional
 from dataclasses import dataclass, field
 
 from .internal.base import TaskState, DEFAULT_MAX_RETRY, DEFAULT_QUEUE_NAME, DEFAULT_TIMEOUT
 from .options import Option
 
+
 @dataclass
 class TaskInfo:
-    """任务的完整元数据信息。
-
-    1:1 对应 Go asynq 的 TaskInfo 结构体。
-    提供任务的不可变视图，包含所有状态和处理历史。
-    """
-    # 任务唯一标识符（UUID）
+    """任务入队后的元数据。"""
     id: str = ""
-    # 任务所在的队列名
     queue: str = DEFAULT_QUEUE_NAME
-    # 任务类型名称，用于路由到对应的 Handler
     type: str = ""
-    # 任务负载数据（二进制）
     payload: bytes = field(default=b"", repr=False)
-    # 任务当前状态
     state: TaskState = TaskState.PENDING
-    # 最大重试次数
     max_retry: int = DEFAULT_MAX_RETRY
-    # 已重试次数
     retried: int = 0
-    # 最近一次失败的错误消息
     last_err: str = ""
-    # 最近一次失败的时间（纳秒时间戳），0 表示从未失败
     last_failed_at: int = 0
-    # 任务处理超时（秒），0 表示无超时
     timeout: int = DEFAULT_TIMEOUT
-    # 任务截止时间（纳秒时间戳），0 表示无截止
     deadline: int = 0
-    # 任务聚合组名，空字符串表示不属于任何组
     group: str = ""
-    # 下次处理时间（纳秒时间戳），用于 scheduled/retry 状态
     next_process_at: int = 0
-    # 是否为孤儿任务（原 worker 已死，由 recoverer 捡起）
     is_orphaned: bool = False
-    # 完成后保留时长（秒），0 表示不保留
     retention: int = 0
-    # 完成时间（纳秒时间戳），0 表示未完成
     completed_at: int = 0
-    # 任务执行结果（二进制），仅在 completed 状态时有效
     result: bytes = field(default=b"", repr=False)
-    # 任务附加请求头
-    headers: Dict[str, str] = field(default_factory=dict)
+    headers: dict = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
-        """将 TaskInfo 转为字典，用于序列化输出。"""
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "id": self.id,
-            "queue": self.queue,
-            "type": self.type,
-            "payload": self.payload,
-            "state": str(self.state),
-            "max_retry": self.max_retry,
-            "retried": self.retried,
-            "last_err": self.last_err,
-            "last_failed_at": self.last_failed_at,
-            "timeout": self.timeout,
-            "deadline": self.deadline,
-            "group": self.group,
-            "next_process_at": self.next_process_at,
-            "is_orphaned": self.is_orphaned,
-            "retention": self.retention,
-            "completed_at": self.completed_at,
-            "result": self.result,
+            "id": self.id, "queue": self.queue, "type": self.type,
+            "payload": self.payload, "state": str(self.state),
+            "max_retry": self.max_retry, "retried": self.retried,
+            "last_err": self.last_err, "last_failed_at": self.last_failed_at,
+            "timeout": self.timeout, "deadline": self.deadline,
+            "group": self.group, "next_process_at": self.next_process_at,
+            "is_orphaned": self.is_orphaned, "retention": self.retention,
+            "completed_at": self.completed_at, "result": self.result,
             "headers": self.headers,
         }
 
+
 class Task:
-    """任务对象，表示一个将要被处理的工作单元。
+    """任务对象。
 
-    1:1 对应 Go asynq 的 Task 结构体。
-    任务由类型名（用于路由）和负载数据（业务数据）组成。
+    Pythonic API:
+        task = Task("email:send", payload)
+        task.type        # 属性访问
+        task.payload     # 属性访问
+        task.id          # 任务 ID（处理时由 Server 设置）
+        task.queue       # 队列名
+        task.timeout     # 超时秒数
+        task.remaining   # 剩余时间
+        task.cancelled   # 是否取消
 
-    Usage:
-        task = Task("email:send", json.dumps({"to": "a@b.com"}).encode())
-        task = Task("image:resize", payload, Queue("critical"), MaxRetry(3))
+    兼容旧 API:
+        task.type()      # 仍可用，但建议改用 task.type
+        task.payload()   # 仍可用
     """
 
     def __init__(
@@ -91,102 +68,145 @@ class Task:
         typename: str,
         payload: bytes = b"",
         *opts: Option,
-        headers: Optional[dict[str, str] ]= None,
+        headers: Optional[dict[str, str]] = None,
     ):
-        """创建一个新任务实例。
-
-        Args:
-            typename: 任务类型名称，用于路由到对应的 Handler（如 "email:send"）
-            payload: 任务的业务负载数据（二进制），默认空
-            *opts: 任务配置选项（MaxRetry, Queue, Timeout 等）
-            headers: 附加的请求头键值对
-
-        Raises:
-            ValueError: typename 为空时抛出
-        """
-        # 验证任务类型名不能为空
         if not typename:
             raise ValueError("任务类型名不能为空")
 
-        # 任务类型标识符，用于 ServeMux 路由匹配
         self._typename = typename
-        # 任务负载数据
         self._payload = payload
-        # 任务配置选项列表
-        self._opts: List[Option] = list(opts)
-        # 任务附加请求头
-        self._headers: Dict[str, str] = dict(headers) if headers else {}
-        # 结果写入器引用（在处理时由 Server 设置）
-        self._writer: Optional["ResultWriter"] = None
+        self._opts: list[Option] = list(opts)
+        self._headers: dict[str, str] = dict(headers) if headers else {}
+        self._writer = None
+
+        # 运行时上下文（原 Context 的功能，处理时由 Server 注入）
+        self._id: str = ""
+        self._queue: str = ""
+        self._timeout: int = 0
+        self._deadline: int = 0
+        self._start_ns: int = 0
+        self._cancelled: bool = False
+
+    # ======== 属性访问（Pythonic）========
 
     @property
     def typename(self) -> str:
-        """返回任务类型名称。"""
+        """任务类型名。"""
         return self._typename
 
+    @property
     def type(self) -> str:
-        """返回任务类型名称（兼容方法）。1:1 对应 Go asynq 的 Task.Type() 方法。"""
+        """任务类型名（别名）。"""
         return self._typename
 
+    @property
     def payload(self) -> bytes:
-        """返回任务负载数据。1:1 对应 Go asynq 的 Task.Payload() 方法。"""
+        """负载数据。"""
         return self._payload
 
-    def result_writer(self) -> Optional["ResultWriter"]:
-        """返回关联的结果写入器。1:1 对应 Go asynq 的 Task.ResultWriter() 方法。
+    @property
+    def headers(self) -> dict[str, str]:
+        """请求头。"""
+        return dict(self._headers)
 
-        仅在任务由 Server 处理后可用，Client 端创建时为 None。
-        """
+    @property
+    def options(self) -> list[Option]:
+        """任务选项。"""
+        return list(self._opts)
+
+    @property
+    def id(self) -> str:
+        """任务 ID（处理时由 Server 设置）。"""
+        return self._id
+
+    @property
+    def queue(self) -> str:
+        """队列名。"""
+        return self._queue
+
+    @property
+    def timeout(self) -> int:
+        """超时秒数。"""
+        return self._timeout
+
+    @property
+    def deadline(self) -> int:
+        """截止时间戳（纳秒）。"""
+        return self._deadline
+
+    @property
+    def cancelled(self) -> bool:
+        """是否已被取消。"""
+        return self._cancelled
+
+    @property
+    def remaining(self) -> int:
+        """剩余处理时间（秒），无超时返回 -1。"""
+        if self._timeout <= 0:
+            return -1
+        if self._start_ns == 0:
+            return self._timeout
+        elapsed = (int(_time.time() * 1e9) - self._start_ns) // 1_000_000_000
+        return max(0, self._timeout - elapsed)
+
+    # ======== 结果写入 ========
+
+    def result_writer(self):
+        """返回结果写入器。"""
         return self._writer
 
-    def set_result_writer(self, writer: "ResultWriter") -> None:
-        """设置结果写入器（由 Server 内部调用）。"""
+    def _set_writer(self, writer) -> None:
         self._writer = writer
 
     async def update_state(self, data: dict) -> None:
-        """上报中间状态（立即写入 Redis，处理中可多次调用）。
-
-        Key: {task_type}:state:{task_id}，TTL 1 小时。
-        """
+        """上报中间状态（立即写 Redis）。"""
         if self._writer:
             await self._writer.update_state(data)
 
     async def finish(self, data: dict) -> None:
-        """写入最终结果（立即写入 Redis，处理完调用一次）。
-
-        Key: {task_type}:result:{task_id}。
-        """
+        """写入最终结果。"""
         if self._writer:
             await self._writer.finish(data)
 
-    def options(self) -> List[Option]:
-        """返回任务的所有配置选项。"""
-        return list(self._opts)
+    # ======== 兼容旧 API（方法调用）========
 
-    def headers(self) -> Dict[str, str]:
-        """返回任务的附加请求头。"""
+    def type_method(self) -> str:
+        """[已废弃] 用 task.type 代替。"""
+        return self._typename
+
+    def payload_method(self) -> bytes:
+        """[已废弃] 用 task.payload 代替。"""
+        return self._payload
+
+    def headers_method(self) -> dict[str, str]:
+        """[已废弃] 用 task.headers 代替。"""
         return dict(self._headers)
 
+    def options_method(self) -> list[Option]:
+        """[已废弃] 用 task.options 代替。"""
+        return list(self._opts)
+
+    # ======== 内部方法（Server 使用）========
+
+    def _setup_context(self, task_id: str, queue: str, timeout: int, deadline: int, start_ns: int):
+        """Server 内部调用：注入运行时上下文。"""
+        self._id = task_id
+        self._queue = queue
+        self._timeout = timeout
+        self._deadline = deadline
+        self._start_ns = start_ns
+
+    def _cancel(self) -> None:
+        """取消任务。"""
+        self._cancelled = True
+
     def __repr__(self) -> str:
-        """返回任务的字符串表示。"""
         return f"Task(type={self._typename!r}, payload={len(self._payload)} bytes)"
 
     def __str__(self) -> str:
-        """返回任务的可读描述。"""
         return f"Task[{self._typename}]"
 
-def new_task(typename: str, payload: bytes = b"", *opts: Option, headers: Optional[dict[str, str] ]= None) -> Task:
-    """创建新任务的工厂函数。
 
-    1:1 对应 Go asynq 的 NewTask 函数。
-
-    Args:
-        typename: 任务类型名称
-        payload: 负载数据
-        *opts: 任务配置选项
-        headers: 附加请求头
-
-    Returns:
-        Task: 新的任务实例
-    """
+def new_task(typename: str, payload: bytes = b"", *opts: Option, headers: Optional[dict[str, str]] = None) -> Task:
+    """创建新任务。"""
     return Task(typename, payload, *opts, headers=headers)

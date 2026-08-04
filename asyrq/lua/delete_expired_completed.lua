@@ -1,6 +1,6 @@
 -- delete_expired_completed.lua — 删除过期已完成任务脚本
 -- 定期清理已完成但已过保留期的任务数据
--- KEYS[1]: completed ZSet key (asynq:{queue}:completed)
+-- KEYS[1]: completed ZSet key (asyrq:{queue}:completed)
 -- ARGV[1]: 当前时间（纳秒时间戳）
 -- ARGV[2]: 批量删除最大数量
 

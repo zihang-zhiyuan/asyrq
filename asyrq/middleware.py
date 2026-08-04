@@ -2,7 +2,7 @@
 # 定义中间件机制，支持在处理链中插入横切关注点，1:1 对应 Go asynq 的 MiddlewareFunc
 
 from __future__ import annotations
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, List
 from .handler import Handler, Context
 
 # MiddlewareFunc 类型别名 — 中间件函数
@@ -79,13 +79,13 @@ def logging_middleware(logger=None) -> MiddlewareFunc:
             async def process_task(self, ctx: Context, task: "Task") -> None:
                 try:
                     # 记录任务开始
-                    _log(logger, f"开始处理任务: {task.type()}")
+                    _log(logger, f"开始处理任务: {task.type}")
                     await handler.process_task(ctx, task)  # 调用下一个处理器
                     # 记录任务完成
-                    _log(logger, f"任务处理完成: {task.type()}")
+                    _log(logger, f"任务处理完成: {task.type}")
                 except Exception as e:
                     # 记录任务失败
-                    _log(logger, f"任务处理失败: {task.type()}, 错误: {e}")
+                    _log(logger, f"任务处理失败: {task.type}, 错误: {e}")
                     raise  # 重新抛出异常，让 Server 处理重试逻辑
         return _LoggingHandler()
     return middleware
