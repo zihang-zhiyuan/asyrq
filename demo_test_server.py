@@ -10,7 +10,7 @@ logger = logging.getLogger("demo.server")
 
 # Redis 连接可用环境变量覆盖，便于本地手动测试:
 #   ASYRQ_REDIS_ADDR / ASYRQ_REDIS_PASSWORD / ASYRQ_REDIS_DB
-REDIS_ADDR = os.getenv("ASYRQ_REDIS_ADDR", "127.0.0.1:6380")
+REDIS_ADDR = os.getenv("ASYRQ_REDIS_ADDR", "127.0.0.1:6379")
 REDIS_PASSWORD = os.getenv("ASYRQ_REDIS_PASSWORD", "fastapiadmin_redis")
 REDIS_DB = int(os.getenv("ASYRQ_REDIS_DB", "0"))
 

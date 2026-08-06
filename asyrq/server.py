@@ -292,7 +292,10 @@ class Server:
                 await self._broker.archive(msg, "任务类型名为空")
                 return
             task = Task(typename=msg.type, payload=msg.payload, headers=msg.headers)
-            writer = ResultWriter(task_id, self._broker, msg.queue, typename=msg.type)
+            writer = ResultWriter(
+                task_id, self._broker, msg.queue,
+                typename=msg.type, result_key=msg.headers.get("_result_key", ""),
+            )
             task._set_writer(writer)
             task._setup_context(task_id, msg.queue, msg.timeout, msg.deadline, t0)
             task_type, route = split_typename(msg.type)

@@ -122,11 +122,11 @@ async def handle_email(ctx: Context, task: Task):
     data = json.loads(task.payload())
     print(f"发送邮件: {data['to']}")
 
-    # 写入结果 — 自动存到 email:send:result:{task_id}
+    # 写入结果 — 自动存到 asyrq:email:send:result:{task_id}
     # 上报中间状态（实时写入 Redis，1 小时过期）
     await task.update_state({"step": "sending", "to": data["to"]})
 
-    # 写入最终结果 -> 自动存到 email:send:result:{task_id}
+    # 写入最终结果 -> 自动存到 asyrq:email:send:result:{task_id}
     await task.finish({"status": "ok", "to": data["to"]})
 
 asyncio.run(app.run())  # 阻塞，Ctrl+C 优雅退出
@@ -388,8 +388,8 @@ await client.enqueue(Task("data:ingest", payload2), Group("batch"))
 
 | 方法 | Redis Key | TTL | 用途 |
 |------|----------|-----|------|
-| `task.update_state(dict)` | `{type}:state:{id}` | 1 小时 | 处理中实时上报状态 |
-| `task.finish(dict)` | `{type}:result:{id}` | 永久 | 最终结果 |
+| `task.update_state(dict)` | `asyrq:{type}:state:{id}` | 1 小时 | 处理中实时上报状态 |
+| `task.finish(dict)` | `asyrq:{type}:result:{id}` | 永久 | 最终结果 |
 
 ```python
 @app.task("email:send")
@@ -409,15 +409,15 @@ import redis.asyncio as redis
 r = redis.Redis(...)
 
 # 查实时状态
-state = await r.get(f"email:send:state:{task_id}")
+state = await r.get(f"asyrq:email:send:state:{task_id}")
 
 # 查最终结果（读后自行 DEL）
-result = await r.get(f"email:send:result:{task_id}")
-await r.delete(f"email:send:result:{task_id}")
+result = await r.get(f"asyrq:email:send:result:{task_id}")
+await r.delete(f"asyrq:email:send:result:{task_id}")
 
 # 或自定义 key
 await client.enqueue(Task("email:send", payload), ResultKey("my:result"))
-result = await r.get("my:result")  # 读 my:result:{task_id}
+result = await r.get(f"my:result:{task_id}")  # 读 my:result:{task_id}
 ```
 
 ## 配置参考

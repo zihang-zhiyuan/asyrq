@@ -269,7 +269,10 @@ class SyncServer:
             if self._owns_connection:
                 worker_redis = self._redis_opts.make_sync_redis_client()
             worker_broker = SyncRDB(worker_redis, self._logger)
-            writer = SyncResultWriter(task_id, worker_broker, msg.queue, typename=msg.type)
+            writer = SyncResultWriter(
+                task_id, worker_broker, msg.queue,
+                typename=msg.type, result_key=msg.headers.get("_result_key", ""),
+            )
             task._writer = writer
             task._setup_context(task_id, msg.queue, msg.timeout, msg.deadline, t0)
 
