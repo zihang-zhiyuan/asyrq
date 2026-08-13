@@ -286,17 +286,22 @@ class SyncServer:
 
             try:
                 self._handler.process_task(ctx, task)
-                self._broker.done(msg)
-                elapsed = (_timeutil.now() - t0) / 1e9
-                self._logger.info("✓ [%s] %s 完成 耗时 %.2fs", tid, msg.type, elapsed)
+                if task._requeued:
+                    self._logger.info("↻ [%s] %s 已重新入队延迟队列", tid, msg.type)
+                else:
+                    self._broker.done(msg)
+                    elapsed = (_timeutil.now() - t0) / 1e9
+                    self._logger.info("✓ [%s] %s 完成 耗时 %.2fs", tid, msg.type, elapsed)
 
             except SkipRetry:
-                self._broker.archive(msg, "skip retry")
-                self._logger.info("⚠ [%s] %s SkipRetry 归档", tid, msg.type)
+                if not task._requeued:
+                    self._broker.archive(msg, "skip retry")
+                    self._logger.info("⚠ [%s] %s SkipRetry 归档", tid, msg.type)
 
             except Exception as e:
-                self._logger.error("✗ [%s] %s 失败: %s", tid, msg.type, e)
-                self._handle_task_error(msg, task, e)
+                if not task._requeued:
+                    self._logger.error("✗ [%s] %s 失败: %s", tid, msg.type, e)
+                    self._handle_task_error(msg, task, e)
 
             finally:
                 if self._owns_connection and worker_redis is not self._redis:

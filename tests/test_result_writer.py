@@ -51,3 +51,51 @@ async def test_finish_custom_result_key():
     assert broker._client.writes == [
         ("my:out:task-1", None),
     ]
+
+
+class _RequeueBroker:
+    """记录 requeue_delayed 调用的假 broker。"""
+
+    def __init__(self):
+        self.calls = []
+
+    async def requeue_delayed(self, task_type, route, qname, task_id, process_at):
+        self.calls.append((task_type, route, qname, task_id, process_at))
+
+
+async def test_requeue_delayed_writer():
+    """ResultWriter.requeue 按 type/route/queue 调用 broker，并计算正确的 process_at。"""
+    import time as _time
+
+    broker = _RequeueBroker()
+    writer = ResultWriter(
+        "task-1", broker, "critical", typename="pmos_liaoning:rqdj",
+    )
+    await writer.requeue(60)
+
+    task_type, route, qname, task_id, process_at = broker.calls[0]
+    assert (task_type, route, qname, task_id) == ("pmos_liaoning", "rqdj", "critical", "task-1")
+    now = int(_time.time() * 1_000_000_000)
+    assert process_at >= now + 59 * 1_000_000_000
+
+
+async def test_task_retry_in():
+    """Task.retry_in 调用 writer.requeue 并标记 requeued（幂等）。"""
+    from asyrq.task import Task
+
+    calls = []
+
+    class _Writer:
+        async def requeue(self, seconds):
+            calls.append(seconds)
+
+    task = Task("pmos_liaoning:rqdj", b"x")
+    task._set_writer(_Writer())
+
+    await task.retry_in(60)
+    assert calls == [60]
+    assert task.requeued is True
+
+    # 再次调用不应重复入队
+    await task.retry_in(30)
+    assert calls == [60]

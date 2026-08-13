@@ -61,7 +61,8 @@ class SyncRDB:
         """注册所有 Lua 脚本。"""
         for name in [
             "enqueue", "enqueue_unique", "schedule", "schedule_unique",
-            "dequeue", "done", "retry", "archive", "requeue",
+            "dequeue", "done", "retry", "archive", "requeue", "requeue_delayed",
+            "cleanup_active",
             "forward", "list_lease_expired", "write_server_state",
             "clear_server_state", "aggregation_check", "delete_expired_completed",
             "add_to_group_unique",
@@ -197,6 +198,11 @@ class SyncRDB:
         tkey = task_key(task_type, route, qname, task_id_str)
         data = self._client.hget(tkey, "msg")
         if not data:
+            # 任务数据已丢失：原子清理 active/lease 孤儿条目，避免永久残留
+            _get_lua_script("cleanup_active")(
+                keys=[akey, lkey], args=[task_id_str],
+            )
+            self._logger.warn(f"出队的任务数据丢失，已清理孤儿条目: {task_id_str}")
             return None
         return TaskMessage.from_json(data.decode("utf-8"))
 
@@ -267,6 +273,13 @@ class SyncRDB:
                     data = self._client.hget(tkey, "msg")
                     if data:
                         expired.append(TaskMessage.from_json(data.decode("utf-8")))
+                    else:
+                        # 有租约但任务数据已丢失：清理孤儿，避免 lease/active 永久残留
+                        _get_lua_script("cleanup_active")(
+                            keys=[active_key(task_type, route, qname), lkey],
+                            args=[tid_str],
+                        )
+                        self._logger.warn(f"租约过期但任务数据丢失，已清理孤儿条目: {tid_str}")
         return expired
 
     def extend_lease(self, task_type: str, route: str, qname: str, task_ids: list[str], lease_seconds: int) -> None:
@@ -277,6 +290,24 @@ class SyncRDB:
         for tid in task_ids:
             pipe.hset(lkey, tid, str(lease_until))
         pipe.execute()
+
+    def requeue_delayed(
+        self, task_type: str, route: str, qname: str, task_id: str, process_at: int
+    ) -> bool:
+        """把当前执行中的任务原封不动地放回延迟队列（scheduled ZSet）。"""
+        result = _get_lua_script("requeue_delayed")(
+            keys=[
+                active_key(task_type, route, qname),
+                lease_key(task_type, route, qname),
+                scheduled_key(task_type, route, qname),
+                task_key(task_type, route, qname, task_id),
+            ],
+            args=[task_id, str(process_at)],
+        )
+        if not result:
+            self._logger.warn(f"重新入队失败，任务不在 active（可能已被处理）: {task_id}")
+            return False
+        return True
 
     # ======== 服务器状态 ========
     def write_server_state(self, info: ServerInfo, workers: list, ttl: int) -> None:

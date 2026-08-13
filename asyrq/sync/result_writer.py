@@ -32,3 +32,14 @@ class SyncResultWriter:
             key = f"asyrq:{self._typename}:result:{self._task_id}"
         kwargs = {"ex": retention} if retention > 0 else {}
         self._broker._client.set(key, _json.dumps(data, ensure_ascii=False), **kwargs)
+
+    def requeue(self, seconds: int) -> None:
+        """把当前任务原封不动地放回延迟队列，seconds 秒后再取出执行。"""
+        import time as _time
+        from ..internal.base import split_typename
+
+        task_type, route = split_typename(self._typename)
+        process_at = int(_time.time() * 1_000_000_000) + seconds * 1_000_000_000
+        self._broker.requeue_delayed(
+            task_type, route, self._qname, self._task_id, process_at,
+        )

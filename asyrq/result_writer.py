@@ -47,6 +47,21 @@ class ResultWriter:
         kwargs = {"ex": retention} if retention > 0 else {}
         await self._broker._client.set(key, _json.dumps(data, ensure_ascii=False), **kwargs)
 
+    async def requeue(self, seconds: int) -> None:
+        """把当前任务原封不动地放回延迟队列，seconds 秒后再取出执行。
+
+        保持相同 task_id 与 payload；调用后 server 不会再对当前副本执行
+        done/retry/archive，请直接 return（或 raise SkipRetry）。
+        """
+        import time as _time
+        from .internal.base import split_typename
+
+        task_type, route = split_typename(self._typename)
+        process_at = int(_time.time() * 1_000_000_000) + seconds * 1_000_000_000
+        await self._broker.requeue_delayed(
+            task_type, route, self._qname, self._task_id, process_at,
+        )
+
     # ---- 兼容旧版 ----
     async def write(self, data: bytes) -> int:
         self._data = data

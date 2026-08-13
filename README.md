@@ -311,6 +311,28 @@ async def on_error(ctx: Context, task: Task, error: Exception):
 app = Server(redis_opt, Config(error_handler=on_error))
 ```
 
+### 手动重入队（失败后推迟再执行）
+
+如果不想用内置自动重试，而是"失败后把任务原封不动推迟到延迟队列，到时间再取出来"，
+可以在 handler 里调用 `await task.retry_in(seconds)`：
+
+```python
+from asyrq import SkipRetry
+
+@app.task("email:send")
+async def handle_email(ctx, task):
+    try:
+        await send_email(task)
+    except TransientError:
+        await task.retry_in(60)   # 同一个 task_id、同一份 payload，60 秒后再取出
+        raise SkipRetry("已重新入队延迟队列")
+```
+
+调用 `retry_in` 后，任务会从 active 原子移回 scheduled（延迟队列），
+server 不会再对当前副本执行 done/retry/archive，因此不会产生重复活体，
+也不会触发"任务已存在"的去重拦截。注意：同一时刻同一个 task_id 只能有一个活体，
+不要同时使用内置自动重试（handler 直接抛异常）和手动重入队。
+
 ## 中间件
 
 洋葱模型，按注册顺序执行：

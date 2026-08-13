@@ -316,18 +316,24 @@ class Server:
                     if msg.timeout > 0: await _asyncio.wait_for(self._handler.process_task(task), timeout=msg.timeout)
                     else: await self._handler.process_task(task)
 
-                await self._broker.done(msg)
-                elapsed = (_timeutil.now() - t0) / 1e9
-                self._logger.info("✓ [%s] %s 完成 耗时 %.2fs", tid, msg.type, elapsed)
+                if task._requeued:
+                    self._logger.info("↻ [%s] %s 已重新入队延迟队列", tid, msg.type)
+                else:
+                    await self._broker.done(msg)
+                    elapsed = (_timeutil.now() - t0) / 1e9
+                    self._logger.info("✓ [%s] %s 完成 耗时 %.2fs", tid, msg.type, elapsed)
 
             except _asyncio.TimeoutError:
-                await self._handle_task_error(msg, task, TimeoutError("超时"))
+                if not task._requeued:
+                    await self._handle_task_error(msg, task, TimeoutError("超时"))
             except SkipRetry:
-                self._logger.warn("[%s] 跳过重试", tid)
-                await self._broker.archive(msg, "skip retry")
+                if not task._requeued:
+                    self._logger.warn("[%s] 跳过重试", tid)
+                    await self._broker.archive(msg, "skip retry")
             except Exception as e:
-                self._logger.error("[%s] 失败: %s", tid, e)
-                await self._handle_task_error(msg, task, e)
+                if not task._requeued:
+                    self._logger.error("[%s] 失败: %s", tid, e)
+                    await self._handle_task_error(msg, task, e)
         finally:
             self._active_task_ids.pop(task_id, None); semaphore.release()
 

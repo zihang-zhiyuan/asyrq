@@ -86,6 +86,7 @@ class Task:
         self._deadline: int = 0
         self._start_ns: int = 0
         self._cancelled: bool = False
+        self._requeued: bool = False
 
     # ======== 属性访问（Pythonic）========
 
@@ -140,6 +141,11 @@ class Task:
         return self._cancelled
 
     @property
+    def requeued(self) -> bool:
+        """当前任务是否已通过 retry_in() 重新入队延迟队列。"""
+        return self._requeued
+
+    @property
     def remaining(self) -> int:
         """剩余处理时间（秒），无超时返回 -1。"""
         if self._timeout <= 0:
@@ -167,6 +173,19 @@ class Task:
         """写入最终结果。"""
         if self._writer:
             await self._writer.finish(data)
+
+    async def retry_in(self, seconds: int) -> None:
+        """把当前任务原封不动地放回延迟队列，seconds 秒后再取出执行。
+
+        保持相同 task_id 与 payload；与内置自动重试互斥——调用后请直接
+        return（或 raise SkipRetry），server 不会再对当前副本执行
+        done/retry/archive。
+        """
+        if self._requeued:
+            return
+        if self._writer:
+            await self._writer.requeue(seconds)
+            self._requeued = True
 
     # ======== 兼容旧 API（方法调用）========
 

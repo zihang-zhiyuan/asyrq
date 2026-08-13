@@ -101,7 +101,8 @@ class RDB(Broker):
         """注册所有 Lua 脚本到 Redis 客户端。"""
         script_names = [
             "enqueue", "enqueue_unique", "schedule", "schedule_unique",
-            "dequeue", "done", "retry", "archive", "requeue",
+            "dequeue", "done", "retry", "archive", "requeue", "requeue_delayed",
+            "cleanup_active",
             "forward", "list_lease_expired", "write_server_state",
             "clear_server_state", "aggregation_check", "delete_expired_completed",
             "add_to_group_unique",
@@ -371,7 +372,11 @@ class RDB(Broker):
         data = await self._client.hget(tkey, "msg")  # 从 Hash 中获取 msg 字段
 
         if not data:
-            self._logger.warn(f"出队的任务数据丢失: {task_id_str}")
+            # 任务数据已丢失：原子清理 active/lease 孤儿条目，避免永久残留
+            await _get_lua_script("cleanup_active")(
+                keys=[akey, lkey], args=[task_id_str],
+            )
+            self._logger.warn(f"出队的任务数据丢失，已清理孤儿条目: {task_id_str}")
             return None
 
         msg = TaskMessage.from_json(data.decode("utf-8"))  # 反序列化
@@ -488,6 +493,34 @@ class RDB(Broker):
             args=[msg.id],
         )
 
+    async def requeue_delayed(
+        self, task_type: str, route: str, qname: str, task_id: str, process_at: int
+    ) -> bool:
+        """把当前执行中的任务原封不动地放回延迟队列（scheduled ZSet）。
+
+        保持相同 task_id / payload，不增加 retried/failed 计数。
+        供 handler 调用 task.retry_in(seconds) 时使用。
+
+        Returns:
+            bool: True 表示已成功重新入队；False 表示任务不在 active（可能已被处理）
+        """
+        result = await _get_lua_script("requeue_delayed")(
+            keys=[
+                active_key(task_type, route, qname),
+                lease_key(task_type, route, qname),
+                scheduled_key(task_type, route, qname),
+                task_key(task_type, route, qname, task_id),
+            ],
+            args=[task_id, str(process_at)],
+        )
+
+        if not result:
+            self._logger.warn(
+                f"重新入队失败，任务不在 active（可能已被处理）: {task_id}"
+            )
+            return False
+        return True
+
     # ========================================================================
     # 任务前移
     # ========================================================================
@@ -557,6 +590,13 @@ class RDB(Broker):
                     if data:
                         msg = TaskMessage.from_json(data.decode("utf-8"))
                         expired_tasks.append(msg)
+                    else:
+                        # 有租约但任务数据已丢失：清理孤儿，避免 lease/active 永久残留
+                        await _get_lua_script("cleanup_active")(
+                            keys=[active_key(task_type, route, qname), lkey],
+                            args=[tid_str],
+                        )
+                        self._logger.warn(f"租约过期但任务数据丢失，已清理孤儿条目: {tid_str}")
 
         return expired_tasks
 
