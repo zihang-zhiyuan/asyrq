@@ -59,6 +59,8 @@ class SyncConfig:
     name: str = ""
     code: str = ""
     queues: dict = field(default_factory=lambda: {DEFAULT_QUEUE_NAME: 1})
+    # 按路由并发限制: {pattern: limit}，pattern 支持精确 / "xxx:" 前缀 / "*" 或 "" 兜底
+    route_concurrency: dict = field(default_factory=dict)
     strict_priority: bool = False
     error_handler: Optional[Callable] = None
     logger: Optional[Logger] = None
@@ -123,6 +125,7 @@ class SyncServer:
         self._state = "new"
 
         self._shutdown_event = _threading.Event()
+        self._route_semaphores: dict[str, _threading.BoundedSemaphore] = {}
         self._active_task_ids: dict = {}
         self._active_task_ids_lock = _threading.Lock()
 
@@ -225,6 +228,45 @@ class SyncServer:
         """返回可消费的路由列表（精确路由；前缀/catch-all 跳过）。"""
         return [r for r in self._routes() if r and not r.endswith(":")]
 
+    def _match_route_concurrency(self, typename: str):
+        """按 route_concurrency 配置匹配任务类型，返回 (pattern, limit) 或 None。"""
+        conf = self._config.route_concurrency or {}
+        if not conf:
+            return None
+
+        if typename in conf:
+            return (typename, max(0, int(conf[typename])))
+
+        best_pattern = None
+        best_len = 0
+        for pattern, limit in conf.items():
+            if pattern in ("*", "") or not pattern.endswith(":"):
+                continue
+            if typename.startswith(pattern) and len(pattern) > best_len:
+                best_pattern, best_len = pattern, len(pattern)
+        if best_pattern is not None:
+            return (best_pattern, max(0, int(conf[best_pattern])))
+
+        for pattern in ("*", ""):
+            if pattern in conf:
+                return (pattern, max(0, int(conf[pattern])))
+
+        return None
+
+    def _route_semaphore_for(self, typename: str):
+        """获取该任务类型对应路由的并发信号量（无配置/未匹配/limit<=0 时返回 None）。"""
+        matched = self._match_route_concurrency(typename)
+        if not matched:
+            return None
+        pattern, limit = matched
+        if limit <= 0:
+            return None
+        sem = self._route_semaphores.get(pattern)
+        if sem is None:
+            sem = _threading.BoundedSemaphore(limit)
+            self._route_semaphores[pattern] = sem
+        return sem
+
     # ======== 后台线程 ========
 
     def _start_thread(self, target, name: str):
@@ -246,13 +288,19 @@ class SyncServer:
                 if msg is None:
                     _time.sleep(self._config.task_check_interval)
                     continue
+                # 按路由并发限制：容量不足时放回 pending，稍后再取
+                route_sem = self._route_semaphore_for(msg.type)
+                if route_sem is not None and not route_sem.acquire(blocking=False):
+                    self._broker.requeue(msg)
+                    _time.sleep(0.1)
+                    continue
                 # 提交到线程池
-                self._executor.submit(self._worker, msg)
+                self._executor.submit(self._worker, msg, route_sem)
             except Exception as e:
                 self._logger.error(f"处理器错误: {e}")
                 _time.sleep(1)
 
-    def _worker(self, msg: TaskMessage):
+    def _worker(self, msg: TaskMessage, route_sem=None):
         """Worker：在线程池中处理单个任务。"""
         task_id = msg.id
         tid = task_id[:12]
@@ -310,6 +358,8 @@ class SyncServer:
         finally:
             with self._active_task_ids_lock:
                 self._active_task_ids.pop(task_id, None)
+            if route_sem is not None:
+                route_sem.release()
 
     def _handle_task_error(self, msg: TaskMessage, task: Task, error: Exception):
         """处理错误：重试或归档。"""

@@ -48,6 +48,72 @@ class TestRetryDelay:
         assert default_is_failure(ValueError()) is True
 
 
+class TestRouteConcurrency:
+    """route_concurrency 按路由并发限制的匹配逻辑。"""
+
+    @staticmethod
+    def _make_server(route_concurrency):
+        from asyrq.server import Server, Config
+        from asyrq.connection import RedisClientOpt
+        return Server(
+            redis_conn=RedisClientOpt(addr="127.0.0.1:6379"),
+            config=Config(route_concurrency=route_concurrency),
+        )
+
+    def test_no_config(self):
+        s = self._make_server({})
+        assert s._match_route_concurrency("a:b") is None
+
+    def test_exact_match(self):
+        s = self._make_server({"a:b": 2})
+        assert s._match_route_concurrency("a:b") == ("a:b", 2)
+
+    def test_prefix_match(self):
+        s = self._make_server({"a:": 5})
+        assert s._match_route_concurrency("a:b") == ("a:", 5)
+
+    def test_exact_beats_prefix(self):
+        s = self._make_server({"a:b": 2, "a:": 5})
+        assert s._match_route_concurrency("a:b") == ("a:b", 2)
+
+    def test_longest_prefix_wins(self):
+        s = self._make_server({"a:": 3, "a:b:": 4})
+        assert s._match_route_concurrency("a:b:c") == ("a:b:", 4)
+
+    def test_catch_all_star(self):
+        s = self._make_server({"*": 1})
+        assert s._match_route_concurrency("x:y") == ("*", 1)
+
+    def test_catch_all_empty(self):
+        s = self._make_server({"": 1})
+        assert s._match_route_concurrency("x:y") == ("", 1)
+
+    async def test_semaphore_per_pattern(self):
+        """同一 pattern 共享一个信号量，不同 pattern 各自独立。"""
+        s = self._make_server({"a:": 2, "b:": 3})
+        sem_a1 = s._route_semaphore_for("a:1")
+        sem_a2 = s._route_semaphore_for("a:2")
+        sem_b = s._route_semaphore_for("b:1")
+        assert sem_a1 is sem_a2
+        assert sem_a1 is not sem_b
+        assert s._route_semaphore_for("c:1") is None
+
+    async def test_limit_zero_disables_route_limit(self):
+        s = self._make_server({"a:": 0})
+        assert s._route_semaphore_for("a:1") is None
+
+    def test_config_positional_arg(self):
+        """Server(redis_conn, Config(...)) 的位置传参必须真正生效（回归）。"""
+        from asyrq.server import Server, Config
+        from asyrq.connection import RedisClientOpt
+        s = Server(
+            RedisClientOpt(addr="127.0.0.1:6379"),
+            Config(concurrency=8, route_concurrency={"a:": 2}),
+        )
+        assert s._config.concurrency == 8
+        assert s._config.route_concurrency == {"a:": 2}
+
+
 class TestTaskMessage:
     """TaskMessage 序列化的单元测试。"""
 

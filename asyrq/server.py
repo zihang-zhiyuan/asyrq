@@ -37,6 +37,8 @@ class Config:
     name: str = ""
     code: str = ""
     queues: dict = field(default_factory=lambda: {DEFAULT_QUEUE_NAME: 1})
+    # 按路由并发限制: {pattern: limit}，pattern 支持精确 / "xxx:" 前缀 / "*" 或 "" 兜底
+    route_concurrency: dict = field(default_factory=dict)
     strict_priority: bool = False
     error_handler: Optional[ErrorHandler] = None
     logger: Optional[Logger] = None
@@ -132,6 +134,7 @@ class Server:
     def __init__(
         self,
         redis_conn: Any = None,
+        config: Optional[Config] = None,
         redis_addr: str = "127.0.0.1:6379",
         redis_password: str = "",
         redis_db: int = 0,
@@ -139,7 +142,6 @@ class Server:
         code: str = "",
         concurrency: int = 10,
         redis_client: Optional[_redis.Redis] = None,
-        config: Optional[Config] = None,
         **kwargs,
     ):
         self._config = config or Config(
@@ -178,6 +180,7 @@ class Server:
         self._quiet_event: Optional[_asyncio.Event] = None
         self._bg_tasks: list[_asyncio.Task] = []
         self._worker_tasks: set[_asyncio.Task] = set()
+        self._route_semaphores: dict[str, _asyncio.Semaphore] = {}
         self._active_task_ids: dict[str, str] = {}
         self._active_workers: dict[str, dict[str, Any]] = {}
         self._task_types: list[str] = []  # Service 知道的 task type，由 @app.task 注册填充
@@ -239,6 +242,52 @@ class Server:
         """
         return [r for r in self._routes() if r and not r.endswith(":")]
 
+    def _match_route_concurrency(self, typename: str) -> Optional[tuple[str, int]]:
+        """按 route_concurrency 配置匹配任务类型，返回 (匹配到的 pattern, 并发上限)。
+
+        匹配规则与 ServeMux 一致：精确 > 最长前缀（":" 结尾）> catch-all（"*" / ""）。
+        未配置或未匹配返回 None。
+        """
+        conf = self._config.route_concurrency or {}
+        if not conf:
+            return None
+
+        # 精确匹配
+        if typename in conf:
+            return (typename, max(0, int(conf[typename])))
+
+        # 最长前缀匹配（以 ":" 结尾的 pattern）
+        best_pattern: Optional[str] = None
+        best_len = 0
+        for pattern, limit in conf.items():
+            if pattern in ("*", "") or not pattern.endswith(":"):
+                continue
+            if typename.startswith(pattern) and len(pattern) > best_len:
+                best_pattern, best_len = pattern, len(pattern)
+        if best_pattern is not None:
+            return (best_pattern, max(0, int(conf[best_pattern])))
+
+        # catch-all 兜底
+        for pattern in ("*", ""):
+            if pattern in conf:
+                return (pattern, max(0, int(conf[pattern])))
+
+        return None
+
+    def _route_semaphore_for(self, typename: str) -> Optional[_asyncio.Semaphore]:
+        """获取该任务类型对应路由的并发信号量（无配置/未匹配/limit<=0 时返回 None）。"""
+        matched = self._match_route_concurrency(typename)
+        if not matched:
+            return None
+        pattern, limit = matched
+        if limit <= 0:
+            return None
+        sem = self._route_semaphores.get(pattern)
+        if sem is None:
+            sem = _asyncio.Semaphore(limit)
+            self._route_semaphores[pattern] = sem
+        return sem
+
     async def shutdown(self) -> None:
         if self._state in ("closed", "new"): return
         self._logger.info("开始优雅关闭...")
@@ -276,15 +325,26 @@ class Server:
                 )
                 if msg is None:
                     await _asyncio.sleep(self._config.task_check_interval); continue
-                await semaphore.acquire()
-                worker_task = _asyncio.create_task(self._worker(msg, semaphore), name=f"worker-{msg.id[:8]}")
+                # 全局并发 + 按路由并发双重限制
+                route_sem = self._route_semaphore_for(msg.type)
+                acquired: list[_asyncio.Semaphore] = [semaphore]
+                try:
+                    await semaphore.acquire()
+                    if route_sem is not None:
+                        await route_sem.acquire()
+                        acquired.append(route_sem)
+                except BaseException:
+                    for s in acquired:
+                        s.release()
+                    raise
+                worker_task = _asyncio.create_task(self._worker(msg, acquired), name=f"worker-{msg.id[:8]}")
                 self._worker_tasks.add(worker_task)
                 worker_task.add_done_callback(self._worker_tasks.discard)
             except _asyncio.CancelledError: break
             except Exception as e: self._logger.error(f"处理器错误: {e}"); await _asyncio.sleep(1)
         self._logger.info("处理器已停止，等待 worker 完成...")
 
-    async def _worker(self, msg: TaskMessage, semaphore: _asyncio.Semaphore) -> None:
+    async def _worker(self, msg: TaskMessage, semaphores: list[_asyncio.Semaphore]) -> None:
         task_id = msg.id; tid = task_id[:12]; t0 = _timeutil.now()
         try:
             if not msg.type:
@@ -335,7 +395,9 @@ class Server:
                     self._logger.error("[%s] 失败: %s", tid, e)
                     await self._handle_task_error(msg, task, e)
         finally:
-            self._active_task_ids.pop(task_id, None); semaphore.release()
+            self._active_task_ids.pop(task_id, None)
+            for s in semaphores:
+                s.release()
 
     async def _handle_task_error(self, msg: TaskMessage, task: Task, error: Exception) -> None:
         error_msg = str(error)

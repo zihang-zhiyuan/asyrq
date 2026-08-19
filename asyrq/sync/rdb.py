@@ -237,6 +237,15 @@ class SyncRDB:
         now = self._now_nsec()
         _get_lua_script("archive")(keys=[akey, lkey, arkey, tkey, fkey], args=[msg.id, error_msg, str(msg.retried), str(now)])
 
+    def requeue(self, msg: TaskMessage) -> None:
+        """将 active 任务放回 pending 列表（如路由并发容量不足时暂回队列）。"""
+        task_type, route = split_typename(msg.type)
+        akey = active_key(task_type, route, msg.queue)
+        pkey = pending_key(task_type, route, msg.queue)
+        lkey = lease_key(task_type, route, msg.queue)
+        tkey = task_key(task_type, route, msg.queue, msg.id)
+        _get_lua_script("requeue")(keys=[akey, pkey, lkey, tkey], args=[msg.id])
+
     # ======== 前移 ========
     def forward_if_ready(self, task_routes: list[str], queues: list[str]) -> None:
         """将到期任务从 scheduled/retry 前移到 pending。"""

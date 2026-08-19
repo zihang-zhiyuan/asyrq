@@ -452,12 +452,26 @@ result = await r.get(f"my:result:{task_id}")  # 读 my:result:{task_id}
 | `code` | `str` | `""` | 消费者唯一编码（Server ID） |
 | `concurrency` | `int` | CPU 核数 | 全局最大并发数 |
 | `queues` | `dict[str,int]` | `{"default":1}` | 队列名→权重 |
+| `route_concurrency` | `dict[str,int]` | `{}` | 按路由并发限制（精确 / `"xxx:"` 前缀 / `"*"` 兜底） |
 | `strict_priority` | `bool` | `False` | 严格优先级模式 |
 | `shutdown_timeout` | `int` | `8` | 优雅关闭超时秒数 |
 | `log_level` | `LogLevel` | `INFO` | 日志级别 |
 | `log_dir` | `str` | `"logs"` | 日志文件目录 |
 | `retry_delay_func` | `Callable` | 指数退避 | 重试延迟计算 |
 | `error_handler` | `Callable` | `None` | 错误回调 |
+
+按路由并发限制示例（与全局 `concurrency` 叠加生效，取两者更严格者）：
+
+```python
+config = Config(
+    concurrency=10,
+    route_concurrency={
+        "pmos_liaoning:rqdj": 2,   # 精确路由：最多同时 2 个
+        "pmos_liaoning:": 5,       # 前缀：该前缀下最多 5 个
+        "*": 1,                    # 兜底：其余路由最多 1 个
+    },
+)
+```
 | `is_failure_func` | `Callable` | 全部算失败 | 失败判定 |
 | `health_check_interval` | `int` | `15` | 健康检查间隔秒 |
 | `delayed_task_check_interval` | `int` | `5` | 定时任务前移间隔秒 |
