@@ -708,7 +708,7 @@ async def test_version():
     print("\n[20] 版本和导出")
     import asyrq
 
-    check("版本号存在", asyrq.__version__ == "0.1.2")
+    check("版本号存在", asyrq.__version__ == "0.1.6")
     check("ASYNQ_VERSION", asyrq.ASYNQ_VERSION == "0.1.0")
 
     expected = [

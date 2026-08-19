@@ -2,7 +2,7 @@
 # 1:1 对应 Go asynq 包的所有公开类型和函数
 
 # ---- 版本 ----
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 # ---- 核心类型 ----
 from .task import Task, TaskInfo, new_task
